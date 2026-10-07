@@ -34,6 +34,12 @@ APP_USER_MODEL_ID = "4FP.EdgeIEManager"
 LOG_MAX_LINES = 500
 
 
+def _format_bytes(size: int) -> str:
+    if size < 1024 * 1024:
+        return f"{max(0, size) / 1024:.0f} KB"
+    return f"{max(0, size) / 1024 / 1024:.1f} MB"
+
+
 def _enable_dpi_awareness() -> None:
     try:
         import ctypes
@@ -137,6 +143,11 @@ class App:
         self._diagnose_inflight = False
         self._update_inflight = False
         self._pending_update = None
+        self._download_log_milestone = -1
+        self._about_dot: tk.Label | None = None
+        self._download_frame: ttk.Frame | None = None
+        self._download_label: ttk.Label | None = None
+        self._download_progress: ttk.Progressbar | None = None
         self._error_dialog_open = False
         self._error_dialogs_shown = 0
         self._closing = False
@@ -194,6 +205,8 @@ class App:
         for key, dot in self._chip_dots.items():
             role = self._chip_role.get(key, "idle")
             dot.configure(bg=pal["card"], fg=pal[f"{role}"] if role in pal else pal["muted"])
+        if self._about_dot is not None:
+            self._about_dot.configure(bg=pal["bg"], fg=pal["err"])
 
     def on_toggle_theme(self) -> None:
         self.manager.config.theme = theme.DARK if self.theme_var.get() else theme.LIGHT
@@ -376,8 +389,23 @@ class App:
         frame.pack(side="bottom", fill="x", padx=14, pady=(4, 6))
         self.log_frame = frame
 
+        self._download_frame = ttk.Frame(frame, style="Card.TFrame")
+        self._download_label = ttk.Label(
+            self._download_frame, text="准备下载…", style="CardMuted.TLabel"
+        )
+        self._download_label.pack(side="left")
+        self._download_progress = ttk.Progressbar(
+            self._download_frame,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+            length=320,
+        )
+        self._download_progress.pack(side="left", fill="x", expand=True, padx=(8, 0))
+
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True)
+        self._log_body = body
         self.log_text = tk.Text(body, height=6, wrap="word", state="disabled")
         self.log_text.pack(side="left", fill="both", expand=True)
 
@@ -408,6 +436,16 @@ class App:
         self._menus.append(more_menu)
 
         # “关于”放在“更多”旁边，下拉里放版本号和检查更新
+        self._about_dot = tk.Label(
+            bar,
+            text="",
+            width=1,
+            bd=0,
+            font=("Segoe UI", 9),
+            background=self._palette["bg"],
+            foreground=self._palette["err"],
+        )
+        self._about_dot.pack(side="left", padx=(6, 0))
         self._about_button = ttk.Menubutton(bar, text="关于 \u25be")
         about_menu = tk.Menu(self._about_button, tearoff=False)
         about_menu.add_command(label=f"版本 v{__version__}", state="disabled")
@@ -418,7 +456,7 @@ class App:
             command=lambda: update.open_releases_page(self.update_repo()),
         )
         self._about_button.configure(menu=about_menu)
-        self._about_button.pack(side="left", padx=(6, 0))
+        self._about_button.pack(side="left", padx=(2, 0))
         self._menus.append(about_menu)
 
         self.autosave_var = tk.BooleanVar(value=True)
@@ -1001,15 +1039,21 @@ class App:
         self._update_inflight = False
         if info is None:
             self._pending_update = None
+            self._set_update_available(False)
             self.log(f"已是最新版本 v{__version__}。", "ok")
             if not silent:
                 messagebox.showinfo(APP_TITLE, f"当前已是最新版本 v{__version__}。")
             return
 
         self._pending_update = info
+        self._set_update_available(True)
         self.log(f"发现新版本 {info.display}（当前 v{__version__}）。", "ok")
-        # 有新版就要让用户知道；静默检查只是不弹“已是最新”和错误提示
-        self._prompt_update(info)
+        if not silent:
+            self._prompt_update(info)
+
+    def _set_update_available(self, available: bool) -> None:
+        if self._about_dot is not None:
+            self._about_dot.configure(text="\u25cf" if available else "")
 
     def _prompt_update(self, info) -> None:
         lines = [f"当前版本：v{__version__}", f"最新版本：{info.display}"]
@@ -1040,6 +1084,7 @@ class App:
         if self._update_inflight:
             return
         self._update_inflight = True
+        self._begin_download_progress()
         self.log(f"开始下载 {info.display}…")
         threading.Thread(
             target=self._update_download_worker, args=(info, exe), daemon=True
@@ -1047,15 +1092,14 @@ class App:
 
     def _update_download_worker(self, info, exe) -> None:
         target = exe.with_name(update.ASSET_NAME + ".new")
-        state = {"last": -1}
+        state = {"last": -2}
 
         def progress(done: int, total: int) -> None:
-            if total <= 0:
+            percent = -1 if total <= 0 else int(done * 100 / total)
+            if percent == state["last"]:
                 return
-            percent = int(done * 100 / total)
-            if percent >= state["last"] + 20:
-                state["last"] = percent
-                self._task_queue.put(lambda p=percent: self.log(f"  已下载 {p}%"))
+            state["last"] = percent
+            self._task_queue.put(lambda d=done, t=total: self._set_download_progress(d, t))
 
         try:
             update.download(info, target, progress=progress)
@@ -1065,8 +1109,53 @@ class App:
             return
         self._task_queue.put(lambda: self._update_install_done(exe))
 
+    def _begin_download_progress(self) -> None:
+        if (
+            self._download_frame is None
+            or self._download_label is None
+            or self._download_progress is None
+        ):
+            return
+        self._download_log_milestone = -1
+        self._download_label.configure(text="准备下载…")
+        self._download_progress.stop()
+        self._download_progress.configure(mode="determinate", maximum=100, value=0)
+        if not self._download_frame.winfo_manager():
+            self._download_frame.pack(fill="x", before=self._log_body, pady=(0, 6))
+
+    def _set_download_progress(self, done: int, total: int) -> None:
+        if (
+            self._download_label is None
+            or self._download_progress is None
+            or self._download_frame is None
+        ):
+            return
+        if total <= 0:
+            self._download_progress.configure(mode="indeterminate")
+            self._download_progress.start(12)
+            self._download_label.configure(text=f"正在下载 {_format_bytes(done)}")
+            return
+
+        percent = max(0, min(100, int(done * 100 / total)))
+        self._download_progress.stop()
+        self._download_progress.configure(mode="determinate", maximum=100, value=percent)
+        self._download_label.configure(
+            text=f"正在下载 {percent}%  {_format_bytes(done)} / {_format_bytes(total)}"
+        )
+        milestone = percent // 20
+        if milestone > self._download_log_milestone:
+            self._download_log_milestone = milestone
+            self.log(f"  已下载 {percent}%")
+
+    def _finish_download_progress(self) -> None:
+        if self._download_progress is not None:
+            self._download_progress.stop()
+        if self._download_frame is not None and self._download_frame.winfo_manager():
+            self._download_frame.pack_forget()
+
     def _update_install_failed(self, message: str) -> None:
         self._update_inflight = False
+        self._finish_download_progress()
         self.log(f"[!] 更新失败：{message}", "warn")
         messagebox.showerror(
             APP_TITLE, f"更新失败：\n{message}\n\n也可以到下载页手动获取新版本。"
@@ -1075,6 +1164,8 @@ class App:
     def _update_install_done(self, exe) -> None:
         self._update_inflight = False
         self._pending_update = None
+        self._set_update_available(False)
+        self._finish_download_progress()
         self.log("更新完成，正在重启程序…", "ok")
         try:
             update.restart(exe)
