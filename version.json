@@ -1,6 +1,6 @@
 {
-  "version": "1.0.3",
-  "notes": "新增下载进度条；检测到新版本后，“关于”旁显示红点提醒。",
+  "version": "1.0.4",
+  "notes": "测试版本。",
   "download": "https://github.com/paynehe3023/EdgeIEManager/releases/latest/download/EdgeIEManager.exe",
   "sha256": "",
   "size": 0
