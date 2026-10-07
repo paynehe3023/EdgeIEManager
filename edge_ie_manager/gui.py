@@ -137,8 +137,6 @@ class App:
         self._diagnose_inflight = False
         self._update_inflight = False
         self._pending_update = None
-        # “检查更新”按钮只存在于“关于”弹窗里，弹窗关掉后置回 None
-        self._update_button: ttk.Button | None = None
         self._error_dialog_open = False
         self._error_dialogs_shown = 0
         self._closing = False
@@ -405,11 +403,23 @@ class App:
         more_menu = tk.Menu(more, tearoff=False)
         more_menu.add_command(label="复制列表路径", command=self.on_copy_path)
         more_menu.add_command(label="打开数据文件夹", command=self.on_open_folder)
-        more_menu.add_separator()
-        more_menu.add_command(label="关于（版本 / 检查更新）", command=self.on_about)
         more.configure(menu=more_menu)
         more.pack(side="left")
         self._menus.append(more_menu)
+
+        # “关于”放在“更多”旁边，下拉里放版本号和检查更新
+        self._about_button = ttk.Menubutton(bar, text="关于 \u25be")
+        about_menu = tk.Menu(self._about_button, tearoff=False)
+        about_menu.add_command(label=f"版本 v{__version__}", state="disabled")
+        about_menu.add_separator()
+        about_menu.add_command(label="检查更新", command=self.on_check_update)
+        about_menu.add_command(
+            label="打开下载页",
+            command=lambda: update.open_releases_page(self.update_repo()),
+        )
+        self._about_button.configure(menu=about_menu)
+        self._about_button.pack(side="left", padx=(6, 0))
+        self._menus.append(about_menu)
 
         self.autosave_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(bar, text="改动后自动保存", variable=self.autosave_var).pack(
@@ -948,56 +958,6 @@ class App:
         if self.manager.config.update_auto_check and self.update_repo():
             self._check_update(silent=True)
 
-    def on_about(self) -> None:
-        """关于：版本信息、更新源，以及“检查更新”入口。"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("关于")
-        dialog.transient(self.root)
-        dialog.resizable(False, False)
-
-        body = ttk.Frame(dialog, padding=(18, 16))
-        body.pack(fill="both", expand=True)
-
-        ttk.Label(body, text=APP_TITLE, style="Heading.TLabel").pack(anchor="w")
-        ttk.Label(body, text=f"版本 v{__version__}", style="Status.TLabel").pack(
-            anchor="w", pady=(2, 0)
-        )
-        ttk.Label(
-            body,
-            text="在 Edge 里用 IE 模式打开指定网址，按月维护站点列表。",
-            style="Status.TLabel",
-            wraplength=340,
-            justify="left",
-        ).pack(anchor="w", pady=(10, 0))
-
-        ttk.Separator(body).pack(fill="x", pady=12)
-        ttk.Label(body, text=f"更新源：{self.update_repo()}", style="Status.TLabel").pack(anchor="w")
-
-        buttons = ttk.Frame(body)
-        buttons.pack(fill="x", pady=(14, 0))
-
-        def close_dialog() -> None:
-            # 弹窗关掉后按钮就不存在了，后面的更新流程要能容忍
-            self._update_button = None
-            dialog.destroy()
-
-        self._update_button = ttk.Button(
-            buttons, text="检查更新", style="Accent.TButton", command=self.on_check_update
-        )
-        self._update_button.pack(side="left")
-        ttk.Button(
-            buttons,
-            text="打开下载页",
-            command=lambda: update.open_releases_page(self.update_repo()),
-        ).pack(side="left", padx=6)
-        ttk.Button(buttons, text="关闭", command=close_dialog).pack(side="right")
-
-        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
-        dialog.update_idletasks()
-        x = self.root.winfo_rootx() + (self.root.winfo_width() - dialog.winfo_width()) // 2
-        y = self.root.winfo_rooty() + (self.root.winfo_height() - dialog.winfo_height()) // 3
-        dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-
     def on_check_update(self) -> None:
         """按钮入口：已经查到新版本就直接进入升级流程，否则重新检查。"""
         if self._pending_update is not None:
@@ -1017,7 +977,6 @@ class App:
         if self._update_inflight:
             return
         self._update_inflight = True
-        self._set_update_busy(True)
         if not silent:
             self.log("正在检查更新…")
         threading.Thread(
@@ -1034,50 +993,23 @@ class App:
 
     def _update_check_failed(self, message: str, silent: bool) -> None:
         self._update_inflight = False
-        self._set_update_busy(False)
         self.log(f"[!] 检查更新失败：{message}", "warn")
         if not silent:
             messagebox.showwarning(APP_TITLE, f"检查更新失败：\n{message}")
 
     def _update_check_done(self, info, silent: bool) -> None:
         self._update_inflight = False
-        self._set_update_busy(False)
         if info is None:
             self._pending_update = None
-            self._highlight_update_button(None)
             self.log(f"已是最新版本 v{__version__}。", "ok")
             if not silent:
                 messagebox.showinfo(APP_TITLE, f"当前已是最新版本 v{__version__}。")
             return
 
         self._pending_update = info
-        self._highlight_update_button(info)
         self.log(f"发现新版本 {info.display}（当前 v{__version__}）。", "ok")
         # 有新版就要让用户知道；静默检查只是不弹“已是最新”和错误提示
         self._prompt_update(info)
-
-    def _highlight_update_button(self, info) -> None:
-        """有新版时把按钮本身变成提示，省得用户错过。"""
-        button = self._update_button
-        if button is None:
-            return
-        try:
-            if info is None:
-                button.configure(text="检查更新", style="TButton")
-            else:
-                button.configure(text=f"有新版本 {info.display}", style="Accent.TButton")
-        except tk.TclError:
-            pass
-
-    def _set_update_busy(self, busy: bool) -> None:
-        """按钮只存在于“关于”弹窗里，弹窗没开时什么都不用做。"""
-        button = self._update_button
-        if button is None:
-            return
-        try:
-            button.state(["disabled"] if busy else ["!disabled"])
-        except tk.TclError:
-            pass
 
     def _prompt_update(self, info) -> None:
         lines = [f"当前版本：v{__version__}", f"最新版本：{info.display}"]
@@ -1108,7 +1040,6 @@ class App:
         if self._update_inflight:
             return
         self._update_inflight = True
-        self._set_update_busy(True)
         self.log(f"开始下载 {info.display}…")
         threading.Thread(
             target=self._update_download_worker, args=(info, exe), daemon=True
@@ -1136,7 +1067,6 @@ class App:
 
     def _update_install_failed(self, message: str) -> None:
         self._update_inflight = False
-        self._set_update_busy(False)
         self.log(f"[!] 更新失败：{message}", "warn")
         messagebox.showerror(
             APP_TITLE, f"更新失败：\n{message}\n\n也可以到下载页手动获取新版本。"
@@ -1149,7 +1079,6 @@ class App:
         try:
             update.restart(exe)
         except OSError as exc:
-            self._set_update_busy(False)
             self.log(f"[!] 自动重启失败，请手动重新打开程序：{exc}", "warn")
             return
         self.on_close()
