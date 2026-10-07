@@ -16,8 +16,10 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -39,7 +41,9 @@ OLD_SUFFIX = ".old"
 
 USER_AGENT = "EdgeIEManager-Updater"
 CHECK_TIMEOUT = 12
-DOWNLOAD_TIMEOUT = 180
+# 这个超时是“单次网络读写的等待时间”，不是整次下载的总时长。
+# 网速慢但一直在传的下载不会被它打断，只有连接/读取卡住才会触发。
+DOWNLOAD_TIMEOUT = 30
 CHUNK = 64 * 1024
 
 RAW_URL = "https://raw.githubusercontent.com/{repo}/{branch}/{name}"
@@ -50,6 +54,43 @@ RELEASES_PAGE = "https://github.com/{repo}/releases"
 
 class UpdateError(RuntimeError):
     """检查或安装更新过程中的可展示错误。"""
+
+
+class UpdateCancelled(UpdateError):
+    """用户主动取消了下载，界面按“提示”而不是“报错”处理。"""
+
+
+class CancelToken:
+    """下载取消开关。
+
+    取消时除了标记状态，还会直接关掉底层响应对象，让阻塞在网络读取上的
+    下载线程立刻返回，而不是等超时（否则点了取消要几秒到几十秒才有反应）。
+    """
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._response = None
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self) -> None:
+        self._event.set()
+        with self._lock:
+            response = self._response
+        if response is not None:
+            try:
+                response.close()
+            except Exception:  # pragma: no cover - 关闭失败不影响取消语义
+                pass
+
+    def bind(self, response) -> bool:
+        """绑定当前响应对象；若此前已经取消过则返回 True。"""
+        with self._lock:
+            self._response = response
+            return self._event.is_set()
 
 
 @dataclass
@@ -215,19 +256,44 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def download(info: UpdateInfo, dest: str | Path, progress=None) -> Path:
-    """下载安装包到 dest。progress(已下载, 总量) 可用于显示进度。"""
+def download(
+    info: UpdateInfo,
+    dest: str | Path,
+    progress=None,
+    token: CancelToken | None = None,
+) -> Path:
+    """下载安装包到 dest。
+
+    progress(已下载, 总量)：总量未知时传 -1，界面据此切成不确定进度动画。
+    下载一开始就会回调一次 progress(0, -1)，让界面立刻进入“正在连接”状态，
+    而不是一直停在“准备下载”不动（GitHub 下载会先重定向，连接阶段可能很久）。
+    token 传入 CancelToken 时支持中途取消。
+    """
     target = Path(dest)
     target.parent.mkdir(parents=True, exist_ok=True)
+    cancel = token if token is not None else CancelToken()
+    if progress is not None:
+        progress(0, -1)
+
+    def _discard() -> None:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+
     request = urllib.request.Request(
         info.download_url, headers={"User-Agent": USER_AGENT}
     )
     try:
         with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT) as response:
+            if cancel.bind(response):
+                raise UpdateCancelled("已取消下载。")
             total = int(response.headers.get("Content-Length") or info.size or 0)
             done = 0
             with open(target, "wb") as handle:
                 while True:
+                    if cancel.cancelled:
+                        raise UpdateCancelled("已取消下载。")
                     block = response.read(CHUNK)
                     if not block:
                         break
@@ -235,20 +301,35 @@ def download(info: UpdateInfo, dest: str | Path, progress=None) -> Path:
                     done += len(block)
                     if progress is not None:
                         progress(done, total)
+    except UpdateCancelled:
+        _discard()
+        raise
     except urllib.error.HTTPError as exc:
-        raise UpdateError(f"下载失败（HTTP {exc.code}）。") from exc
+        _discard()
+        raise UpdateError(
+            f"下载失败（HTTP {exc.code}）。请确认 Release 里已经上传 {ASSET_NAME}。"
+        ) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        _discard()
+        raise UpdateError(
+            "下载超时：连不上 GitHub 的下载服务器（常见于网络被拦截或太慢）。\n"
+            "可以稍后重试，或点“打开发布页”手动下载。"
+        ) from exc
     except urllib.error.URLError as exc:
+        _discard()
+        if cancel.cancelled:
+            raise UpdateCancelled("已取消下载。") from exc
         raise UpdateError(f"下载失败：{exc.reason}") from exc
     except OSError as exc:
+        _discard()
+        if cancel.cancelled:
+            raise UpdateCancelled("已取消下载。") from exc
         raise UpdateError(f"写入文件失败：{exc}") from exc
 
     if info.sha256:
         actual = sha256_file(target)
         if actual != info.sha256:
-            try:
-                target.unlink()
-            except OSError:
-                pass
+            _discard()
             raise UpdateError(
                 "校验失败，下载的文件不完整，已丢弃。\n"
                 f"期望 {info.sha256[:16]}… 实际 {actual[:16]}…"

@@ -148,6 +148,9 @@ class App:
         self._download_frame: ttk.Frame | None = None
         self._download_label: ttk.Label | None = None
         self._download_progress: ttk.Progressbar | None = None
+        self._download_cancel_button: ttk.Button | None = None
+        self._download_token: update.CancelToken | None = None
+        self._cancel_requested = False
         self._error_dialog_open = False
         self._error_dialogs_shown = 0
         self._closing = False
@@ -402,6 +405,13 @@ class App:
             length=320,
         )
         self._download_progress.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self._download_cancel_button = ttk.Button(
+            self._download_frame,
+            text="取消下载",
+            width=9,
+            command=self._cancel_download,
+        )
+        self._download_cancel_button.pack(side="right", padx=(8, 0))
 
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True)
@@ -1084,6 +1094,8 @@ class App:
         if self._update_inflight:
             return
         self._update_inflight = True
+        self._cancel_requested = False
+        self._download_token = update.CancelToken()
         self._begin_download_progress()
         self.log(f"开始下载 {info.display}…")
         threading.Thread(
@@ -1092,20 +1104,35 @@ class App:
 
     def _update_download_worker(self, info, exe) -> None:
         target = exe.with_name(update.ASSET_NAME + ".new")
-        state = {"last": -2}
+        state = {"last": None, "time": 0.0}
 
         def progress(done: int, total: int) -> None:
-            percent = -1 if total <= 0 else int(done * 100 / total)
-            if percent == state["last"]:
-                return
-            state["last"] = percent
+            now = _time.monotonic()
+            if total <= 0:
+                # 总量未知：按时间节流，避免每 64KB 就往界面塞一条消息。
+                if now - state["time"] < 0.2:
+                    return
+                state["time"] = now
+            else:
+                percent = int(done * 100 / total)
+                if percent == state["last"]:
+                    return
+                state["last"] = percent
             self._task_queue.put(lambda d=done, t=total: self._set_download_progress(d, t))
 
         try:
-            update.download(info, target, progress=progress)
+            update.download(info, target, progress=progress, token=self._download_token)
+            if self._cancel_requested:
+                raise update.UpdateCancelled("已取消下载。")
             update.apply_update(target, exe)
+        except update.UpdateCancelled:
+            self._task_queue.put(self._download_cancelled)
+            return
         except Exception as exc:
-            self._task_queue.put(lambda: self._update_install_failed(str(exc)))
+            if self._cancel_requested:
+                self._task_queue.put(self._download_cancelled)
+            else:
+                self._task_queue.put(lambda: self._update_install_failed(str(exc)))
             return
         self._task_queue.put(lambda: self._update_install_done(exe))
 
@@ -1117,9 +1144,12 @@ class App:
         ):
             return
         self._download_log_milestone = -1
-        self._download_label.configure(text="准备下载…")
+        self._download_label.configure(text="正在连接下载服务器…")
         self._download_progress.stop()
-        self._download_progress.configure(mode="determinate", maximum=100, value=0)
+        self._download_progress.configure(mode="indeterminate", maximum=100, value=0)
+        self._download_progress.start(12)
+        if self._download_cancel_button is not None:
+            self._download_cancel_button.configure(state="normal", text="取消下载")
         if not self._download_frame.winfo_manager():
             self._download_frame.pack(fill="x", before=self._log_body, pady=(0, 6))
 
@@ -1133,7 +1163,10 @@ class App:
         if total <= 0:
             self._download_progress.configure(mode="indeterminate")
             self._download_progress.start(12)
-            self._download_label.configure(text=f"正在下载 {_format_bytes(done)}")
+            if done <= 0:
+                self._download_label.configure(text="正在连接下载服务器…")
+            else:
+                self._download_label.configure(text=f"正在下载 {_format_bytes(done)}…")
             return
 
         percent = max(0, min(100, int(done * 100 / total)))
@@ -1150,8 +1183,29 @@ class App:
     def _finish_download_progress(self) -> None:
         if self._download_progress is not None:
             self._download_progress.stop()
+        if self._download_cancel_button is not None:
+            self._download_cancel_button.configure(state="disabled")
+        self._download_token = None
         if self._download_frame is not None and self._download_frame.winfo_manager():
             self._download_frame.pack_forget()
+
+    def _cancel_download(self) -> None:
+        """用户点了取消：立刻断开连接，剩下的交给下载线程收尾。"""
+        if not self._update_inflight or self._download_token is None:
+            return
+        self._cancel_requested = True
+        self._download_token.cancel()
+        if self._download_label is not None:
+            self._download_label.configure(text="正在取消下载…")
+        if self._download_cancel_button is not None:
+            self._download_cancel_button.configure(state="disabled")
+        self.log("正在取消下载…", "warn")
+
+    def _download_cancelled(self) -> None:
+        self._update_inflight = False
+        self._cancel_requested = False
+        self._finish_download_progress()
+        self.log("已取消更新下载，文件已清理。", "warn")
 
     def _update_install_failed(self, message: str) -> None:
         self._update_inflight = False
