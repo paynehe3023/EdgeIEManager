@@ -1,6 +1,6 @@
 {
-  "version": "1.0.4",
-  "notes": "修复下载长时间停留在“准备下载”的问题；新增下载取消按钮。",
+  "version": "1.0.5",
+  "notes": "测试版本。",
   "download": "https://github.com/paynehe3023/EdgeIEManager/releases/latest/download/EdgeIEManager.exe",
   "sha256": "",
   "size": 0
