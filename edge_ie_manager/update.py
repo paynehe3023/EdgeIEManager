@@ -34,6 +34,12 @@ DEFAULT_REPO = "paynehe3023/EdgeIEManager"
 MANIFEST_BRANCHES = ("main", "master")
 MANIFEST_NAME = "version.json"
 
+# 仅用于开发/测试：把更新源临时指向本机或测试服务器。
+# 例如：set EDGEIE_UPDATE_BASE_URL=http://127.0.0.1:8765
+# 生产环境不要设置这些变量，留空时一律走上面的正式 GitHub 地址。
+BASE_URL_ENV = "EDGEIE_UPDATE_BASE_URL"
+MANIFEST_URL_ENV = "EDGEIE_UPDATE_MANIFEST_URL"
+
 # Release 里必须用这个名字上传主程序，更新器只认它
 ASSET_NAME = "EdgeIEManager.exe"
 CHECKSUM_ASSET = ASSET_NAME + ".sha256"
@@ -148,10 +154,28 @@ def _fetch(url: str, timeout: int = CHECK_TIMEOUT) -> bytes:
         return response.read()
 
 
+def _test_base_url() -> str:
+    """测试用更新源根地址；没有设置时返回空串。"""
+    return os.environ.get(BASE_URL_ENV, "").strip().rstrip("/")
+
+
+def _manifest_urls(repo: str) -> list[str]:
+    """按顺序给出 version.json 的候选地址。"""
+    base = _test_base_url()
+    if base:
+        return [f"{base}/{MANIFEST_NAME}"]
+    override = os.environ.get(MANIFEST_URL_ENV, "").strip()
+    if override:
+        return [override]
+    return [
+        RAW_URL.format(repo=repo, branch=branch, name=MANIFEST_NAME)
+        for branch in MANIFEST_BRANCHES
+    ]
+
+
 def _load_manifest(repo: str) -> dict | None:
     """读 version.json；两个分支都 404 时返回 None。"""
-    for branch in MANIFEST_BRANCHES:
-        url = RAW_URL.format(repo=repo, branch=branch, name=MANIFEST_NAME)
+    for url in _manifest_urls(repo):
         try:
             return json.loads(_fetch(url).decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -196,9 +220,14 @@ def check_for_update(repo: str, current: str = __version__) -> UpdateInfo | None
             raise UpdateError("version.json 里缺少 version 字段。")
         if not is_newer(latest, current):
             return None
-        download = str(manifest.get("download") or "").strip() or STABLE_ASSET_URL.format(
-            repo=repo, name=ASSET_NAME
-        )
+        download = str(manifest.get("download") or "").strip()
+        if not download:
+            base = _test_base_url()
+            download = (
+                f"{base}/{ASSET_NAME}"
+                if base
+                else STABLE_ASSET_URL.format(repo=repo, name=ASSET_NAME)
+            )
         return UpdateInfo(
             version=latest,
             download_url=download,
