@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .version import __version__
+from .runtime_env import clean_environment
 
 # 发行仓库，格式 owner/repo。留空时界面会提示“未配置更新源”。
 DEFAULT_REPO = "paynehe3023/EdgeIEManager"
@@ -420,7 +421,14 @@ def cleanup_old_files(directory: str | Path) -> None:
 
 def restart(exe: str | Path) -> None:
     target = Path(exe)
-    subprocess.Popen([str(target)], cwd=str(target.parent), close_fds=True)
+    # 必须换掉环境：直接继承会把 _PYI_* 引导变量带过去，新进程会把自己当成
+    # 老进程的子进程，跳过解包后卡在父进程校验上（见 runtime_env 模块注释）。
+    subprocess.Popen(
+        [str(target)],
+        cwd=str(target.parent),
+        close_fds=True,
+        env=clean_environment(),
+    )
 
 
 def open_releases_page(repo: str) -> None:

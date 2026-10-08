@@ -35,7 +35,7 @@ $env:EDGEIE_UPDATE_BASE_URL = "http://127.0.0.1:8765"
 D:\tmp\edgeie-test\EdgeIEManager.exe
 ```
 
-注意：本地假源把清单版本写成 `9.9.9`，但提供的 exe 里面仍然是 `1.0.5`。
+注意：本地假源把清单版本写成 `9.9.9`，但提供的 exe 里面仍然是 `1.0.6`。
 所以替换并重启后，程序还会再次认为 `9.9.9` 是新版本，这是假版本号造成的预期循环，
 不是线上更新器故障。日常主要用它验证“检查更新、进度条、取消、校验和不匹配”，
 不要把这个循环当成正式发布验收。正式替换与重启请用第二或第三层做一次。
@@ -60,7 +60,7 @@ D:\tmp\edgeie-test\EdgeIEManager.exe
 
 ## 三、真实发布验收（上线前做一次）
 
-1. 在正式仓库建 Release（tag 形如 `v1.0.5`），上传 `EdgeIEManager.exe`，文件名不能改。
+1. 在正式仓库建 Release（tag 形如 `v1.0.6`），上传 `EdgeIEManager.exe`，文件名不能改。
 2. 确认 `main` 分支的 `version.json` 里 `version` 是新版本号。
 3. 用**上一个正式版**装一次，点 关于 → 检查更新，走完整流程。
 
@@ -71,6 +71,10 @@ D:\tmp\edgeie-test\EdgeIEManager.exe
 - 1.0.2 及更早：下载过程只在日志里按 20% 打印，没有进度条；
 - 1.0.3：有进度条，但在收到第一个数据块之前一直显示“准备下载…”，
   而且不能取消；GitHub 下载要先重定向，国内网络这一步可能卡很久。
+- 1.0.5 及更早：替换完成后弹出的新进程会继承旧进程的 PyInstaller 引导变量
+  （`_PYI_ARCHIVE_FILE` 等），引导器误判成“老进程的子进程”，校验父进程失败后
+  弹 `Security validation failure` 并退出。**文件其实已经换好了**，
+  点掉弹框、手动启动一次程序即可；1.0.6 起自动重启不再有这个弹框。
 
 下载本身走的是同一套 `urllib` 流式写入，只要网络能通就会完成。
 验证老版本时，可以盯着程序目录下有没有 `EdgeIEManager.exe.new` 在变大，
@@ -79,7 +83,7 @@ D:\tmp\edgeie-test\EdgeIEManager.exe
 ## 常见坑
 
 - **release 资源名必须是 `EdgeIEManager.exe`**：更新器只认这个名字，
-  上传成 `EdgeIEManager (1).exe` 或 `EdgeIEManager-1.0.5.exe` 都找不到；
+  上传成 `EdgeIEManager (1).exe` 或 `EdgeIEManager-1.0.6.exe` 都找不到；
 - **程序文件不能改名**：自动替换要求自身文件名是 `EdgeIEManager.exe`。
   改名成 `EdgeIEManager-old.exe` 之类的会被判定为“便携版”，
   只能手动下载；同理 `EdgeIEManager-Clean.exe` 刻意不参与自动替换；

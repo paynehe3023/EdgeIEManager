@@ -1,3 +1,3 @@
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 APP_NAME = "EdgeIEManager"
 APP_TITLE = "Edge IE 模式站点管理器"

@@ -1,6 +1,6 @@
 {
-  "version": "1.0.5",
-  "notes": "修复不同分辨率和 DPI 缩放场景下界面元素拥挤、文字被遮挡的问题。",
+  "version": "1.0.6",
+  "notes": "修复自动更新后重启时弹出 Security validation failure 报错的问题（旧进程把 PyInstaller 引导变量带给了新进程）。",
   "download": "https://github.com/paynehe3023/EdgeIEManager/releases/latest/download/EdgeIEManager.exe",
   "sha256": "",
   "size": 0

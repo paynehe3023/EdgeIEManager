@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .version import APP_NAME, __version__
+from .runtime_env import stripped_bootstrap_environment
 
 try:  # pragma: no cover - 非 Windows 平台
     import winreg
@@ -303,7 +304,11 @@ def run_elevated(
     info.lpDirectory = str(Path.cwd())
     info.nShow = SW_HIDE
 
-    if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)):
+    # ShellExecuteExW 没有 env 参数，只能继承当前进程环境；先摘掉 _PYI_* 引导
+    # 变量，否则提权起来的那一份会把自己当成老进程的子进程并报安全校验失败。
+    with stripped_bootstrap_environment():
+        launched = ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info))
+    if not launched:
         return False, -1
 
     exit_code = 0

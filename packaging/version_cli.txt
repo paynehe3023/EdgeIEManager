@@ -2,8 +2,8 @@
 # Version resource for EdgeIEManager-CLI.exe
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 5, 0),
-    prodvers=(1, 0, 5, 0),
+    filevers=(1, 0, 6, 0),
+    prodvers=(1, 0, 6, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
         '080404B0',
         [StringStruct('CompanyName', 'payne'),
         StringStruct('FileDescription', 'Edge IE 模式站点管理器 命令行工具'),
-        StringStruct('FileVersion', '1.0.5.0'),
+        StringStruct('FileVersion', '1.0.6.0'),
         StringStruct('InternalName', 'EdgeIEManager-CLI'),
         StringStruct('LegalCopyright', 'Copyright (C) 2026 payne'),
         StringStruct('OriginalFilename', 'EdgeIEManager-CLI.exe'),
         StringStruct('ProductName', 'Edge IE 模式站点管理器'),
-        StringStruct('ProductVersion', '1.0.5.0'),
+        StringStruct('ProductVersion', '1.0.6.0'),
         StringStruct('Comments', '作者：payne，联系方式：947919822'),
         StringStruct('Author', 'payne'),
         StringStruct('Contact', '947919822')])
