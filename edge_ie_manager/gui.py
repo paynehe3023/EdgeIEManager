@@ -12,6 +12,7 @@ import tkinter as tk
 import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from types import SimpleNamespace
 
 from . import diagnostics, policy, sitelist, theme, update
 from .app import Manager
@@ -32,6 +33,9 @@ MODE_CHOICES = [MODE_LABELS[key] for key in ("neutral", "ie", "edge")]
 APP_USER_MODEL_ID = "4FP.EdgeIEManager"
 # 日志窗口只保留最近这么多行，避免长时间运行后无限堆积。
 LOG_MAX_LINES = 500
+# 日志区最小高度（像素）：再挤也要留几行，方便看报错。
+# 日志框最小高度：要放得下右侧的“自动滚动 + 清空日志”，小于这个值按钮会被裁掉。
+LOG_MIN_HEIGHT = 98
 
 
 def _format_bytes(size: int) -> str:
@@ -41,11 +45,32 @@ def _format_bytes(size: int) -> str:
 
 
 def _enable_dpi_awareness() -> None:
+    """声明 DPI 感知级别，避免不同缩放下窗口尺寸和控件错位。
+
+    优先 Per-Monitor V2（Win10 1703+），其次 Per-Monitor（Win8.1+），
+    最后退回系统级 DPI 感知；全部失败也不影响程序运行。
+    """
     try:
         import ctypes
+    except Exception:  # pragma: no cover - 非 Windows
+        return
 
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:  # pragma: no cover - 老系统或非 Windows
+    try:
+        # -4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except Exception:  # pragma: no cover - 老系统没有这个函数
+        pass
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor
+        return
+    except Exception:  # pragma: no cover
+        pass
+
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:  # pragma: no cover
         pass
 
 
@@ -163,8 +188,7 @@ class App:
 
         root.title(f"{APP_TITLE} v{__version__}")
         _set_window_icon(root)
-        root.geometry("1180x780")
-        root.minsize(1020, 700)
+        self._apply_initial_geometry()
 
         self._build_styles()
         self._build_top()
@@ -177,11 +201,168 @@ class App:
         self.reload_all(first=True)
         self._refresh_status()
         self._apply_theme_widgets()
+        self._geometry_ready = False
+        self.root.bind("<Configure>", self._on_root_configure)
         self.root.after(150, self._poll_tasks)
         self._update_timer = self.root.after(2500, self._startup_update_work)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ------------------------------------------------------------------ 界面
+    def _display_scale(self) -> float:
+        """当前字体的像素缩放倍数（100% DPI 时为 1.0）。
+
+        高 DPI 下字体变大，布局断点也要同步放大，否则同样的窗口宽度
+        会在缩放电脑上显得拥挤。
+        """
+        try:
+            scaling = float(self.root.tk.call("tk", "scaling"))
+        except (tk.TclError, ValueError, TypeError):
+            return 1.0
+        return max(1.0, min(2.0, scaling / (96.0 / 72.0)))
+
+    def _apply_initial_geometry(self) -> None:
+        """按屏幕可用区域和 DPI 缩放计算初始窗口大小，避免超出屏幕。"""
+        self.root.update_idletasks()
+        scale = self._display_scale()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+
+        desired_w = int(1180 * scale)
+        desired_h = int(780 * scale)
+        margin_x = int(60 * scale)
+        margin_y = int(110 * scale)
+
+        width = min(desired_w, max(760, screen_w - margin_x))
+        height = min(desired_h, max(520, screen_h - margin_y))
+        width = max(700, min(width, screen_w - 20))
+        height = max(480, min(height, screen_h - 40))
+
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 3)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _finalize_geometry(self) -> None:
+        """按最坏情况（紧凑布局）计算最小窗口尺寸，保证表单不会被裁掉。"""
+        scale = self._display_scale()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        needed_h = self._measure_min_height()
+
+        min_w = max(720, min(int(920 * scale), screen_w - 40))
+        min_h = max(int(520 * scale), min(needed_h, screen_h - 60))
+        self.root.minsize(min_w, min_h)
+
+        # 量完最坏情况后恢复真实布局（宽窗口仍然是两栏一行）。
+        self._top_compact = None
+        self._template_compact = None
+        self._action_compact = None
+        self.root.update_idletasks()
+        self._layout_top_bar(max(1, self.top_bar.winfo_width()))
+        self._layout_template_bar(max(1, self.template_bar.winfo_width()))
+        self._layout_action_bar(max(1, self.action_bar.winfo_width()))
+
+        width = max(self.root.winfo_width(), min_w)
+        height = max(self.root.winfo_height(), min_h)
+        self.root.geometry(f"{width}x{height}")
+        self.root.update_idletasks()
+        self._fit_log_height(height)
+
+    def _measure_min_height(self) -> int:
+        """临时切到紧凑布局，量出窗口最小高度需求（像素）。"""
+        # 测量期间要挡住 <Configure> 回调，否则刚切到紧凑布局就被改回去。
+        self._measuring = True
+        try:
+            self._top_compact = None
+            self._layout_top_bar(0)
+            self._template_compact = None
+            self._layout_template_bar(0)
+            self._action_compact = None
+            self._layout_action_bar(0)
+            self._modes_compact = None
+            self._on_right_panel_configure(SimpleNamespace(width=280))
+            self.root.update_idletasks()
+            needed = (
+                self.top_bar.winfo_reqheight()
+                + self.template_bar.winfo_reqheight()
+                + self.action_bar.winfo_reqheight()
+                + self._body_right.winfo_reqheight()
+                + LOG_MIN_HEIGHT
+                + 16
+            )
+        finally:
+            self._measuring = False
+        return needed
+
+    def _on_root_configure(self, event) -> None:
+        if event.widget is not self.root or getattr(self, "_closing", False):
+            return
+        # 等这一轮布局稳定后再算日志高度，否则读到的是上一个尺寸的状态。
+        pending = getattr(self, "_fit_job", None)
+        if pending is not None:
+            try:
+                self.root.after_cancel(pending)
+            except tk.TclError:  # pragma: no cover
+                pass
+        self._fit_job = self.root.after_idle(self._apply_log_fit)
+
+    def _apply_log_fit(self) -> None:
+        self._fit_job = None
+        try:
+            if not self._geometry_ready and self.root.winfo_height() > 120:
+                # 窗口真正映射后才量得准字体和控件高度，这里再定一次最小尺寸。
+                self._geometry_ready = True
+                self._finalize_geometry()
+            self._fit_log_height(self.root.winfo_height())
+        except tk.TclError:  # pragma: no cover - 关闭过程中的竞态
+            pass
+
+    def _fit_log_height(self, window_height: int) -> None:
+        """窗口变矮时压缩日志区高度，优先保证上面的表单完整可见。"""
+        if getattr(self, "_log_natural_height", None) is None:
+            return
+        used = (
+            self.top_bar.winfo_reqheight()
+            + self.template_bar.winfo_reqheight()
+            + self.action_bar.winfo_reqheight()
+        )
+        available = window_height - used - 24
+        try:
+            need_body = self._body_right.winfo_reqheight()
+        except tk.TclError:  # pragma: no cover - 关闭过程中的竞态
+            return
+        height = max(LOG_MIN_HEIGHT, min(self._log_natural_height, available - need_body))
+        self._toggle_log_limit_label(height - self._log_frame_chrome())
+        if abs(height - getattr(self, "_log_height", -1)) < 2:
+            return
+        self._log_height = height
+        try:
+            self.log_frame.configure(height=height)
+        except tk.TclError:  # pragma: no cover
+            pass
+
+    def _log_frame_chrome(self) -> int:
+        """日志框外框（标题、内边距、边框）占掉的高度，用来把内高换算成框高。"""
+        try:
+            return max(0, self.log_frame.winfo_height() - self._log_body.winfo_height())
+        except tk.TclError:  # pragma: no cover - 关闭过程中的竞态
+            return 0
+
+    def _toggle_log_limit_label(self, height: int) -> None:
+        """日志内高不够时藏起“最多 N 行”说明，避免底部文字被裁掉。"""
+        label = getattr(self, "_log_limit_label", None)
+        if label is None:
+            return
+        need = getattr(self, "_log_side_full_height", 0)
+        should_show = height >= need - 2
+        shown = label.winfo_manager() == "pack"
+        try:
+            if should_show and not shown:
+                label.pack(side="top", pady=(4, 0))
+            elif not should_show and shown:
+                label.pack_forget()
+        except tk.TclError:  # pragma: no cover - 关闭过程中的竞态
+            pass
+
     def _build_styles(self) -> None:
         """先把 ttk 样式铺好，再建控件，否则控件会先按默认主题画出来。"""
         self._palette = theme.apply(self.root, self.manager.config.theme)
@@ -224,26 +405,34 @@ class App:
     def _build_top(self) -> None:
         bar = ttk.Frame(self.root, padding=(14, 12, 14, 8), style="Card.TFrame")
         bar.pack(fill="x")
+        bar.columnconfigure(0, weight=1)
         self.top_bar = bar
 
-        # 右侧操作区先布局，保证主按钮一定拿得到位置，不会被长状态文字挤掉。
+        # 状态芯片和操作按钮各占一行容器，窗口变窄时自动折成两行。
+        status_row = ttk.Frame(bar, style="Card.TFrame")
+        button_row = ttk.Frame(bar, style="Card.TFrame")
+        self._top_status_row = status_row
+        self._top_button_row = button_row
+        self._top_compact: bool | None = None
+
         self.theme_var = tk.BooleanVar(value=self.manager.config.theme == theme.DARK)
         ttk.Checkbutton(
-            bar, text="深色模式", variable=self.theme_var, command=self.on_toggle_theme
+            button_row, text="深色模式", variable=self.theme_var, command=self.on_toggle_theme
         ).pack(side="right", padx=(10, 0))
-        ttk.Button(bar, text="刷新状态", command=self._refresh_status).pack(side="right")
-        self._diagnose_button = ttk.Button(bar, text="环境诊断", command=self.on_diagnose)
+        ttk.Button(button_row, text="刷新状态", command=self._refresh_status).pack(side="right")
+        self._diagnose_button = ttk.Button(button_row, text="环境诊断", command=self.on_diagnose)
         self._diagnose_button.pack(side="right", padx=(0, 6))
         self._install_button = ttk.Button(
-            bar, text="写入 / 更新策略", style="Accent.TButton", command=self.on_install_policy
+            button_row, text="写入 / 更新策略", style="Accent.TButton", command=self.on_install_policy
         )
         self._install_button.pack(side="right", padx=(0, 8))
+
         # 三个状态芯片：彩色圆点 + 短文字，完整内容悬停查看
         self.status_labels: dict[str, ttk.Label] = {}
         self._chip_dots: dict[str, tk.Label] = {}
         self._chip_tips: dict[str, _Tooltip] = {}
         for key in ("list", "policy", "edge"):
-            frame = ttk.Frame(bar, style="Card.TFrame")
+            frame = ttk.Frame(status_row, style="Card.TFrame")
             frame.pack(side="left", padx=(0, 16))
             dot = tk.Label(frame, text="\u25cf", bd=0, font=("Segoe UI", 11))
             dot.pack(side="left", padx=(0, 5))
@@ -253,29 +442,87 @@ class App:
             self._chip_dots[key] = dot
             self._chip_tips[key] = _Tooltip(label)
 
+        bar.bind("<Configure>", lambda event: self._layout_top_bar(event.width))
+        self._layout_top_bar(int(1180 * self._display_scale()))
+
+    def _layout_top_bar(self, width: int) -> None:
+        if getattr(self, "_measuring", False):
+            return
+        scale = self._display_scale()
+        needed = self._top_status_row.winfo_reqwidth() + self._top_button_row.winfo_reqwidth()
+        compact = width < max(needed + 28, int(880 * scale))
+        if compact == self._top_compact:
+            return
+        self._top_compact = compact
+        self._top_status_row.grid_forget()
+        self._top_button_row.grid_forget()
+        if compact:
+            self._top_button_row.grid(row=0, column=0, sticky="w")
+            self._top_status_row.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        else:
+            self._top_status_row.grid(row=0, column=0, sticky="w")
+            self._top_button_row.grid(row=0, column=1, sticky="e")
+
     def _build_template_bar(self) -> None:
         bar = ttk.Frame(self.root, padding=(14, 0, 14, 8), style="Card.TFrame")
         bar.pack(fill="x")
+        bar.columnconfigure(2, weight=1, minsize=140)
         self.template_bar = bar
+        self._template_compact: bool | None = None
 
-        ttk.Label(bar, text="月度模板", style="CardHeading.TLabel").pack(side="left", padx=(0, 8))
+        ttk.Label(bar, text="月度模板", style="CardHeading.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
         self.month_var = tk.StringVar(value="本月")
         month_combo = ttk.Combobox(
             bar, textvariable=self.month_var, values=["本月", "下月", "下下月"], state="readonly", width=7
         )
-        month_combo.pack(side="left")
+        month_combo.grid(row=0, column=1, sticky="w")
         month_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh_templates())
 
         self.template_var = tk.StringVar()
         self.template_combo = ttk.Combobox(bar, textvariable=self.template_var, state="readonly", width=46)
-        self.template_combo.pack(side="left", padx=8)
+        self.template_combo.grid(row=0, column=2, sticky="ew", padx=8)
 
-        ttk.Button(bar, text="生成到输入框", command=self.on_use_template).pack(side="left")
-        ttk.Button(bar, text="一键添加该月全部", command=self.on_add_templates).pack(side="left", padx=6)
-        ttk.Button(bar, text="管理模板", command=self.open_template_manager).pack(side="left")
+        buttons = ttk.Frame(bar, style="Card.TFrame")
+        ttk.Button(buttons, text="生成到输入框", command=self.on_use_template).pack(side="left")
+        ttk.Button(buttons, text="一键添加该月全部", command=self.on_add_templates).pack(
+            side="left", padx=6
+        )
+        ttk.Button(buttons, text="管理模板", command=self.open_template_manager).pack(side="left")
+        self._template_buttons = buttons
 
         self.template_hint = ttk.Label(bar, text="", style="CardMuted.TLabel")
-        self.template_hint.pack(side="right")
+
+        bar.bind("<Configure>", lambda event: self._layout_template_bar(event.width))
+        self._layout_template_bar(int(1180 * self._display_scale()))
+
+    def _layout_template_bar(self, width: int) -> None:
+        if getattr(self, "_measuring", False):
+            return
+        scale = self._display_scale()
+        needed = (
+            self._template_buttons.winfo_reqwidth()
+            + self.template_combo.winfo_reqwidth()
+            + self.template_hint.winfo_reqwidth()
+            + int(200 * scale)
+        )
+        compact = width < max(needed, int(1150 * scale))
+        if compact == self._template_compact:
+            return
+        self._template_compact = compact
+        self._template_buttons.grid_forget()
+        self.template_hint.grid_forget()
+        if compact:
+            self._template_buttons.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+            self.template_hint.grid(
+                row=2, column=0, columnspan=4, sticky="w", pady=(4, 0)
+            )
+        else:
+            self._template_buttons.grid(row=0, column=3, sticky="e")
+            self.template_hint.grid(
+                row=1, column=0, columnspan=4, sticky="e", pady=(6, 0)
+            )
 
     def _build_body(self) -> None:
         body = ttk.Frame(self.root, padding=(14, 6, 14, 6))
@@ -283,11 +530,13 @@ class App:
         body.columnconfigure(0, weight=5)
         body.columnconfigure(1, weight=3)
         body.rowconfigure(0, weight=1)
+        self._body = body
 
         left = ttk.Frame(body)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
+        self._body_left = left
 
         search = ttk.Frame(left)
         search.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -329,6 +578,7 @@ class App:
         right = ttk.LabelFrame(body, text=" 添加 / 修改 ", padding=(12, 10))
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(1, weight=1)
+        self._body_right = right
 
         row = 0
         ttk.Label(right, text="网址").grid(row=row, column=0, sticky="w")
@@ -346,14 +596,25 @@ class App:
         self.mode_var = tk.StringVar(value="ie")
         modes = ttk.Frame(right)
         modes.grid(row=row, column=1, sticky="w", padx=(8, 0))
+        self._mode_buttons: list[ttk.Radiobutton] = []
         for value in ("ie", "neutral", "edge"):
-            ttk.Radiobutton(
+            button = ttk.Radiobutton(
                 modes, text=MODE_LABELS[value], value=value, variable=self.mode_var,
                 command=self.on_mode_change,
-            ).pack(side="left", padx=(0, 10))
+            )
+            button.grid(
+                row=0,
+                column=len(self._mode_buttons),
+                sticky="w",
+                padx=(0 if not self._mode_buttons else 10, 0),
+            )
+            self._mode_buttons.append(button)
+        self._modes_compact: bool | None = None
         row += 1
 
-        self.mode_hint = ttk.Label(right, text="", style="CardMuted.TLabel", wraplength=340, justify="left")
+        self.mode_hint = ttk.Label(
+            right, text="", style="CardMuted.TLabel", wraplength=340, justify="left"
+        )
         self.mode_hint.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
         row += 1
 
@@ -385,7 +646,34 @@ class App:
         ttk.Button(bulk_buttons, text="批量添加", command=self.on_bulk_add).pack(side="left")
         ttk.Button(bulk_buttons, text="从剪贴板粘贴", command=self.on_paste_clipboard).pack(side="left", padx=6)
 
+        right.bind("<Configure>", self._on_right_panel_configure)
         self.on_mode_change()
+
+    def _on_right_panel_configure(self, event) -> None:
+        """窄窗口下让说明文字跟着换行，并把单选项折行，避免被裁掉。"""
+        width = max(event.width, 200)
+        self.mode_hint.configure(wraplength=max(160, width - 30))
+
+        scale = self._display_scale()
+        available = width - int(80 * scale)
+        compact = available < int(300 * scale)
+        if compact == self._modes_compact:
+            return
+        self._modes_compact = compact
+        for button in self._mode_buttons:
+            button.grid_forget()
+        if compact:
+            self._mode_buttons[0].grid(row=0, column=0, sticky="w")
+            self._mode_buttons[1].grid(row=0, column=1, sticky="w", padx=(10, 0))
+            self._mode_buttons[2].grid(row=1, column=0, sticky="w", pady=(2, 0))
+        else:
+            for index, button in enumerate(self._mode_buttons):
+                button.grid(
+                    row=0,
+                    column=index,
+                    sticky="w",
+                    padx=(0 if index == 0 else 10, 0),
+                )
 
     def _build_log(self) -> None:
         frame = ttk.LabelFrame(self.root, text=" 日志 ", padding=(10, 6))
@@ -416,6 +704,7 @@ class App:
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True)
         self._log_body = body
+        # 文本区默认 6 行高；整个日志框的高度由 _fit_log_height 按窗口空间调整。
         self.log_text = tk.Text(body, height=6, wrap="word", state="disabled")
         self.log_text.pack(side="left", fill="both", expand=True)
 
@@ -424,20 +713,38 @@ class App:
         self.autoscroll_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(side, text="自动滚动", variable=self.autoscroll_var).pack(side="top")
         ttk.Button(side, text="清空日志", width=8, command=self.on_clear_log).pack(side="top", pady=(6, 0))
-        ttk.Label(side, text=f"最多 {LOG_MAX_LINES} 行", style="CardMuted.TLabel").pack(side="top", pady=(4, 0))
+        self._log_limit_label = ttk.Label(
+            side, text=f"最多 {LOG_MAX_LINES} 行", style="CardMuted.TLabel"
+        )
+        self._log_limit_label.pack(side="top", pady=(4, 0))
+
+        # 记住默认高度，之后固定高度由布局逻辑控制，避免右侧按钮把日志框撑得过高。
+        frame.update_idletasks()
+        self._log_side_full_height = side.winfo_reqheight()
+        self._log_natural_height = frame.winfo_reqheight()
+        self._log_height = self._log_natural_height
+        frame.configure(height=self._log_height)
+        frame.pack_propagate(False)
 
     def _build_actions(self) -> None:
         bar = ttk.Frame(self.root, padding=(14, 0, 14, 12))
         bar.pack(side="bottom", fill="x")
+        bar.columnconfigure(0, weight=1)
         self.action_bar = bar
 
-        ttk.Button(bar, text="移除策略", command=self.on_uninstall_policy).pack(side="left")
-        ttk.Button(bar, text="重启 Edge 生效", command=self.on_restart_edge).pack(side="left", padx=6)
-        ttk.Button(bar, text="打开检查页", command=self.on_open_check_pages).pack(side="left")
-        ttk.Button(bar, text="导出 .reg", command=self.on_export_reg).pack(side="left", padx=6)
+        left = ttk.Frame(bar)
+        right = ttk.Frame(bar)
+        self._action_left = left
+        self._action_right = right
+        self._action_compact: bool | None = None
+
+        ttk.Button(left, text="移除策略", command=self.on_uninstall_policy).pack(side="left")
+        ttk.Button(left, text="重启 Edge 生效", command=self.on_restart_edge).pack(side="left", padx=6)
+        ttk.Button(left, text="打开检查页", command=self.on_open_check_pages).pack(side="left")
+        ttk.Button(left, text="导出 .reg", command=self.on_export_reg).pack(side="left", padx=6)
 
         self._menus: list[tk.Menu] = []
-        more = ttk.Menubutton(bar, text="更多 \u25be")
+        more = ttk.Menubutton(left, text="更多 \u25be")
         more_menu = tk.Menu(more, tearoff=False)
         more_menu.add_command(label="复制列表路径", command=self.on_copy_path)
         more_menu.add_command(label="打开数据文件夹", command=self.on_open_folder)
@@ -447,7 +754,7 @@ class App:
 
         # “关于”放在“更多”旁边，下拉里放版本号和检查更新
         self._about_dot = tk.Label(
-            bar,
+            left,
             text="",
             width=1,
             bd=0,
@@ -456,7 +763,7 @@ class App:
             foreground=self._palette["err"],
         )
         self._about_dot.pack(side="left", padx=(6, 0))
-        self._about_button = ttk.Menubutton(bar, text="关于 \u25be")
+        self._about_button = ttk.Menubutton(left, text="关于 \u25be")
         about_menu = tk.Menu(self._about_button, tearoff=False)
         about_menu.add_command(label=f"版本 v{__version__}", state="disabled")
         about_menu.add_separator()
@@ -470,23 +777,44 @@ class App:
         self._menus.append(about_menu)
 
         self.autosave_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar, text="改动后自动保存", variable=self.autosave_var).pack(
-            side="right", padx=(10, 0)
+        ttk.Checkbutton(right, text="改动后自动保存", variable=self.autosave_var).pack(
+            side="left", padx=(10, 0)
         )
 
         self.scope_var = tk.StringVar(
             value=policy.SCOPE_LABELS.get(self.manager.config.scope, policy.SCOPE_LABELS[policy.SCOPE_USER])
         )
         scope_combo = ttk.Combobox(
-            bar,
+            right,
             textvariable=self.scope_var,
             values=[policy.SCOPE_LABELS[policy.SCOPE_USER], policy.SCOPE_LABELS[policy.SCOPE_MACHINE]],
             state="readonly",
             width=18,
         )
-        scope_combo.pack(side="right", padx=(6, 0))
+        scope_combo.pack(side="left", padx=(6, 0))
         scope_combo.bind("<<ComboboxSelected>>", self.on_scope_change)
-        ttk.Label(bar, text="策略范围").pack(side="right")
+        ttk.Label(right, text="策略范围").pack(side="left")
+
+        bar.bind("<Configure>", lambda event: self._layout_action_bar(event.width))
+        self._layout_action_bar(int(1180 * self._display_scale()))
+
+    def _layout_action_bar(self, width: int) -> None:
+        if getattr(self, "_measuring", False):
+            return
+        scale = self._display_scale()
+        needed = self._action_left.winfo_reqwidth() + self._action_right.winfo_reqwidth()
+        compact = width < max(needed + 28, int(1000 * scale))
+        if compact == self._action_compact:
+            return
+        self._action_compact = compact
+        self._action_left.grid_forget()
+        self._action_right.grid_forget()
+        if compact:
+            self._action_left.grid(row=0, column=0, sticky="w")
+            self._action_right.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        else:
+            self._action_left.grid(row=0, column=0, sticky="w")
+            self._action_right.grid(row=0, column=1, sticky="e")
 
     # ------------------------------------------------------------------ 数据
     def reload_all(self, first: bool = False) -> None:

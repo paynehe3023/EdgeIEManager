@@ -35,7 +35,7 @@ $env:EDGEIE_UPDATE_BASE_URL = "http://127.0.0.1:8765"
 D:\tmp\edgeie-test\EdgeIEManager.exe
 ```
 
-注意：本地假源把清单版本写成 `9.9.9`，但提供的 exe 里面仍然是 `1.0.4`。
+注意：本地假源把清单版本写成 `9.9.9`，但提供的 exe 里面仍然是 `1.0.5`。
 所以替换并重启后，程序还会再次认为 `9.9.9` 是新版本，这是假版本号造成的预期循环，
 不是线上更新器故障。日常主要用它验证“检查更新、进度条、取消、校验和不匹配”，
 不要把这个循环当成正式发布验收。正式替换与重启请用第二或第三层做一次。
@@ -60,7 +60,7 @@ D:\tmp\edgeie-test\EdgeIEManager.exe
 
 ## 三、真实发布验收（上线前做一次）
 
-1. 在正式仓库建 Release（tag 形如 `v1.0.4`），上传 `EdgeIEManager.exe`，文件名不能改。
+1. 在正式仓库建 Release（tag 形如 `v1.0.5`），上传 `EdgeIEManager.exe`，文件名不能改。
 2. 确认 `main` 分支的 `version.json` 里 `version` 是新版本号。
 3. 用**上一个正式版**装一次，点 关于 → 检查更新，走完整流程。
 
@@ -79,7 +79,7 @@ D:\tmp\edgeie-test\EdgeIEManager.exe
 ## 常见坑
 
 - **release 资源名必须是 `EdgeIEManager.exe`**：更新器只认这个名字，
-  上传成 `EdgeIEManager (1).exe` 或 `EdgeIEManager-1.0.4.exe` 都找不到；
+  上传成 `EdgeIEManager (1).exe` 或 `EdgeIEManager-1.0.5.exe` 都找不到；
 - **程序文件不能改名**：自动替换要求自身文件名是 `EdgeIEManager.exe`。
   改名成 `EdgeIEManager-old.exe` 之类的会被判定为“便携版”，
   只能手动下载；同理 `EdgeIEManager-Clean.exe` 刻意不参与自动替换；
