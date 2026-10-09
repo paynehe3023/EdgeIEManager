@@ -15,13 +15,14 @@ from tkinter import filedialog, messagebox, ttk
 from types import SimpleNamespace
 
 from . import diagnostics, policy, sitelist, theme, update
-from .app import Manager
+from .app import Manager, OperationResult
 from .config import load_config, save_config
 from .model import (
     MODE_DESCRIPTIONS,
     MODE_LABELS,
     SiteMode,
     mode_label,
+    normalize_url,
     parse_mode,
 )
 from .sitelist import SiteListError
@@ -166,6 +167,8 @@ class App:
         self._task_queue: queue.Queue = queue.Queue()
         self._status_inflight = False
         self._diagnose_inflight = False
+        self._policy_inflight = False
+        self._check_pages_inflight = False
         self._update_inflight = False
         self._pending_update = None
         self._download_log_milestone = -1
@@ -738,7 +741,8 @@ class App:
         self._action_right = right
         self._action_compact: bool | None = None
 
-        ttk.Button(left, text="移除策略", command=self.on_uninstall_policy).pack(side="left")
+        self._uninstall_button = ttk.Button(left, text="移除策略", command=self.on_uninstall_policy)
+        self._uninstall_button.pack(side="left")
         ttk.Button(left, text="重启 Edge 生效", command=self.on_restart_edge).pack(side="left", padx=6)
         ttk.Button(left, text="打开检查页", command=self.on_open_check_pages).pack(side="left")
         ttk.Button(left, text="导出 .reg", command=self.on_export_reg).pack(side="left", padx=6)
@@ -1052,6 +1056,22 @@ class App:
         except tk.TclError:
             pass
 
+    def _run_bg(self, work, done) -> None:
+        """在后台线程执行 work()，结束后把结果交回界面线程执行 done(result)。
+
+        work 抛出的异常会原样作为 result 传回，交给 done 判断并转换成人话，
+        避免在工作线程里弹窗或碰控件。提权、读注册表这类会阻塞的操作都应走这里。
+        """
+
+        def runner() -> None:
+            try:
+                result = work()
+            except BaseException as exc:  # 统一带回界面线程展示
+                result = exc
+            self._task_queue.put(lambda: done(result))
+
+        threading.Thread(target=runner, daemon=True).start()
+
     def current_scope(self) -> str:
         label = self.scope_var.get()
         for scope, text in policy.SCOPE_LABELS.items():
@@ -1060,11 +1080,17 @@ class App:
         return policy.SCOPE_USER
 
     # ------------------------------------------------------------------ 事件
+    def selected_urls(self) -> list[str]:
+        """当前选中的所有网址，按列表里的顺序返回。"""
+        return [
+            self.tree_items[item]
+            for item in self.tree.selection()
+            if item in self.tree_items
+        ]
+
     def selected_url(self) -> str | None:
-        selection = self.tree.selection()
-        if not selection:
-            return None
-        return self.tree_items.get(selection[0])
+        urls = self.selected_urls()
+        return urls[0] if urls else None
 
     def on_tree_select(self, _event=None) -> None:
         url = self.selected_url()
@@ -1101,10 +1127,18 @@ class App:
             self._after_change()
 
     def on_update(self) -> None:
-        old_url = self.selected_url()
-        if not old_url:
+        urls = self.selected_urls()
+        if not urls:
             messagebox.showinfo(APP_TITLE, "请先在左侧选中要修改的记录。")
             return
+        if len(urls) > 1:
+            messagebox.showinfo(
+                APP_TITLE,
+                f"“更新选中”一次只能修改一条记录，当前选中了 {len(urls)} 条。\n"
+                "请只选中要修改的那一条，或改用“批量添加”。",
+            )
+            return
+        old_url = urls[0]
         mode = parse_mode(self.mode_var.get(), SiteMode.IE)
         result = self.manager.update_site(
             old_url,
@@ -1118,13 +1152,20 @@ class App:
             self._after_change()
 
     def on_delete(self) -> None:
-        url = self.selected_url()
-        if not url:
+        urls = self.selected_urls()
+        if not urls:
             messagebox.showinfo(APP_TITLE, "请先在左侧选中要删除的记录。")
             return
-        if not messagebox.askyesno(APP_TITLE, f"确定要从站点列表里删除吗？\n\n{url}"):
+        if len(urls) == 1:
+            question = f"确定要从站点列表里删除吗？\n\n{urls[0]}"
+        else:
+            preview = "\n".join(urls[:5])
+            if len(urls) > 5:
+                preview += f"\n… 等共 {len(urls)} 条"
+            question = f"确定要删除选中的 {len(urls)} 条记录吗？\n\n{preview}"
+        if not messagebox.askyesno(APP_TITLE, question):
             return
-        result = self.manager.remove_site(url, save=self.autosave_var.get())
+        result = self.manager.remove_sites(urls, save=self.autosave_var.get())
         self.report(result)
         self._after_change()
 
@@ -1181,40 +1222,80 @@ class App:
 
     # ------------------------------------------------------------------ 动作
     def on_install_policy(self) -> None:
-        scope = self.current_scope()
-        result = self.manager.install_policy(scope=scope)
-        if not result.ok and result.needs_admin:
-            if not self._confirm_elevation(
-                "写入这条策略需要管理员权限。\n\n"
-                "当前账户对注册表的 Policies 位置只有只读权限（常见于单位统一管控的电脑），"
-                "需要弹出 UAC 提示，以管理员身份重试。\n\n继续吗？"
-            ):
-                self.report(result)
-                return
-            result = self.manager.install_policy(scope=scope, elevate=True)
-        self.report(result)
-        self._refresh_status()
-        if result.ok:
-            self.log("提示：Edge 需要重启才能读取新策略；可在 edge://compat/enterprise 查看已加载的站点列表。")
+        self._start_policy_op("install")
 
     def on_uninstall_policy(self) -> None:
-        scope = self.current_scope()
         if not messagebox.askyesno(
             APP_TITLE,
             "确定要删除本工具写入的 IE 模式策略吗？\n\n"
             "删除后需要重启 Edge，才会恢复系统原有的 IE 模式行为。",
         ):
             return
-        result = self.manager.uninstall_policy(scope=scope)
-        if not result.ok and result.needs_admin:
-            if not self._confirm_elevation(
-                "删除这条策略需要管理员权限，是否弹出 UAC 提示并以管理员身份重试？"
-            ):
+        self._start_policy_op("uninstall")
+
+    def _start_policy_op(self, action: str, elevated: bool = False) -> None:
+        """在后台线程写入/删除策略。
+
+        elevate=True 时底层会弹 UAC 并阻塞等待用户操作，必须离开界面线程，
+        否则窗口会一直“未响应”，用户还以为程序卡死了。
+        """
+        if self._policy_inflight:
+            return
+        scope = self.current_scope()
+        self._policy_inflight = True
+        self._set_policy_buttons_enabled(False)
+        if elevated:
+            self.log("正在以管理员权限执行，请留意屏幕上的 UAC 提示…")
+        else:
+            self.log("正在写入策略…" if action == "install" else "正在删除策略…")
+
+        def work() -> OperationResult:
+            if action == "install":
+                return self.manager.install_policy(scope=scope, elevate=elevated)
+            return self.manager.uninstall_policy(scope=scope, elevate=elevated)
+
+        self._run_bg(
+            work,
+            lambda result: self._apply_policy_op(action, scope, elevated, result),
+        )
+
+    def _apply_policy_op(self, action, scope, elevated, result) -> None:
+        if isinstance(result, BaseException):
+            result = OperationResult(False, f"操作失败：{result}", "error")
+        if not result.ok and result.needs_admin and not elevated:
+            # 后台线程已经结束，回到界面线程再问是否提权。
+            self._policy_inflight = False
+            self._set_policy_buttons_enabled(True)
+            if action == "install":
+                prompt = (
+                    "写入这条策略需要管理员权限。\n\n"
+                    "当前账户对注册表的 Policies 位置只有只读权限（常见于单位统一管控的电脑），"
+                    "需要弹出 UAC 提示以管理员身份重试。\n\n"
+                    "如果拿不到管理员权限，可以把“策略范围”切到“当前用户 (免管理员)”再试。\n\n继续吗？"
+                )
+            else:
+                prompt = "删除这条策略需要管理员权限，是否弹出 UAC 提示并以管理员身份重试？"
+            if not self._confirm_elevation(prompt):
                 self.report(result)
+                self._refresh_status()
                 return
-            result = self.manager.uninstall_policy(scope=scope, elevate=True)
+            self._start_policy_op(action, elevated=True)
+            return
+
+        self._policy_inflight = False
+        self._set_policy_buttons_enabled(True)
         self.report(result)
         self._refresh_status()
+        if result.ok and action == "install":
+            self.log("提示：Edge 需要重启才能读取新策略；可在 edge://compat/enterprise 查看已加载的站点列表。")
+
+    def _set_policy_buttons_enabled(self, enabled: bool) -> None:
+        state = ["!disabled"] if enabled else ["disabled"]
+        for button in (self._install_button, self._uninstall_button):
+            try:
+                button.state(state)
+            except tk.TclError:  # pragma: no cover - 关闭过程中的竞态
+                pass
 
     def _confirm_elevation(self, message: str) -> bool:
         return messagebox.askyesno(APP_TITLE, message)
@@ -1230,31 +1311,85 @@ class App:
         self._refresh_status()
 
     def on_open_check_pages(self) -> None:
-        """打开 Edge 内部检查页，并把“应该看到什么”一起写进日志。"""
-        if not diagnostics.edge_primary_path():
-            messagebox.showerror(APP_TITLE, "没有找到 Microsoft Edge，无法打开检查页。")
+        """核对策略是否真的生效，再把结论和检查页一起交给用户。"""
+        if self._check_pages_inflight:
             return
+        self._check_pages_inflight = True
+        self.log("正在核对策略与站点列表…")
+        self._run_bg(self._policy_verdict, self._apply_check_pages)
 
+    def _policy_verdict(self) -> tuple[bool, list[str]]:
+        """在后台线程里读注册表/站点列表，返回 (是否正常, 逐行说明)。"""
+        lines: list[str] = []
+        ok = True
+        scope = self.current_scope()
         expected = self.manager.site_list_url()
-        ok, message = diagnostics.launch_edge(["edge://policy", "edge://compat/enterprise"])
-        if not ok:
-            self.log(f"[!] {message}")
-            messagebox.showerror(APP_TITLE, message)
-            return
+        lines.append(f"期望的站点列表地址：{expected}")
 
         try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(expected)
-            copied = expected
-        except tk.TclError:
-            copied = ""
+            sl = self.manager.site_list
+            lines.append(f"站点列表文件：{len(sl.sites)} 条记录，修订号 {sl.version}")
+            if not sl.sites:
+                ok = False
+                lines.append("  [X] 列表里还没有任何条目，先去左侧添加要跑 IE 模式的网址。")
+        except Exception as exc:  # 站点列表损坏时也要给出结论
+            ok = False
+            lines.append(f"  [X] 站点列表文件读取失败：{exc}")
 
-        self.log("已打开两个检查页，请对照下面的值核对：")
-        self.log(f"  edge://policy → 搜 InternetExplorerIntegrationSiteList，值应为：{expected}")
-        self.log("    其中 InternetExplorerIntegrationLevel 应为 1。")
-        self.log("  edge://compat/enterprise → 看“站点列表”里是否就是本工具的条目。")
-        if copied:
-            self.log(f"  站点列表地址已复制到剪贴板：{copied}")
+        state = policy.read_policy(scope)
+        lines.append(f"当前范围（{policy.describe_scope(scope)}）的策略：{state.summary()}")
+        if not state.exists:
+            ok = False
+            lines.append("  [X] 还没有写入策略，点上方的“写入 / 更新策略”。")
+        elif not state.enabled:
+            ok = False
+            lines.append("  [X] 策略没有完全生效：缺少站点列表地址，或 IE 模式等级不是 1。")
+        elif normalize_url(state.site_list_url) != normalize_url(expected):
+            ok = False
+            lines.append("  [X] 实际生效的站点列表地址和本工具配置的不一致，可能是 IT 下发了另一份策略。")
+
+        machine = policy.read_policy(policy.SCOPE_MACHINE)
+        if (
+            machine.enabled
+            and state.enabled
+            and normalize_url(machine.site_list_url) != normalize_url(state.site_list_url)
+        ):
+            lines.append("  [!] 整机策略和当前用户策略指向不同的站点列表，Edge 会以整机策略为准。")
+
+        if diagnostics.edge_running():
+            lines.append("  [!] Edge 正在运行：刚改过策略的话，需要点“重启 Edge 生效”。")
+
+        lines.append("检查结果：策略配置正常。" if ok else "检查结果：发现问题，见上面带 [X] 的行。")
+        return ok, lines
+
+    def _apply_check_pages(self, result) -> None:
+        self._check_pages_inflight = False
+        if isinstance(result, BaseException):
+            self.log(f"[!] 策略检查失败：{result}", "warn")
+            messagebox.showerror(APP_TITLE, f"策略检查失败：{result}")
+            return
+        ok, lines = result
+        for line in lines:
+            self.log(line, "ok" if (ok and line.startswith("检查结果")) else "info")
+        if ok:
+            self.log("—— 策略检查通过 ——", "ok")
+        else:
+            self.log("—— 策略检查发现问题 ——", "warn")
+
+        if diagnostics.edge_primary_path():
+            launched, message = diagnostics.launch_edge(["edge://policy", "edge://compat/enterprise"])
+            if launched:
+                self.log("已在 Edge 打开 edge://policy 和 edge://compat/enterprise 供人工复核。")
+            else:
+                self.log(f"[!] {message}")
+        else:
+            self.log("[!] 没有找到 Microsoft Edge，跳过打开检查页。")
+
+        body = "\n".join(lines)
+        if ok:
+            messagebox.showinfo(APP_TITLE, f"策略检查通过。\n\n{body}")
+        else:
+            messagebox.showwarning(APP_TITLE, f"策略检查发现问题：\n\n{body}")
 
     def on_export_reg(self) -> None:
         scope = self.current_scope()
@@ -1450,7 +1585,7 @@ class App:
 
         try:
             update.download(info, target, progress=progress, token=self._download_token)
-            if self._cancel_requested:
+            if self._cancel_requested or self._closing:
                 raise update.UpdateCancelled("已取消下载。")
             update.apply_update(target, exe)
         except update.UpdateCancelled:
@@ -1557,6 +1692,16 @@ class App:
         self.on_close()
 
     def on_close(self) -> None:
+        # 下载/替换进行中关闭窗口会导致新文件已经落盘但程序没重启，
+        # 甚至替换到一半。这里先让用户确认，并把下载线程取消掉。
+        if self._update_inflight and self._download_token is not None:
+            if not messagebox.askyesno(
+                APP_TITLE,
+                "正在下载新版本，关闭程序会取消本次下载。\n\n确定要关闭吗？",
+            ):
+                return
+            self._cancel_requested = True
+            self._download_token.cancel()
         self._closing = True
         try:
             self.manager.config.scope = self.current_scope()

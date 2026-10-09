@@ -35,6 +35,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $iconPng = Join-Path $PSScriptRoot "image\appIcon.png"
 $iconIco = Join-Path $PSScriptRoot "image\appIcon.ico"
+$syncVersion = Join-Path $PSScriptRoot "tools\sync_version.py"
 $versionMain = Join-Path $PSScriptRoot "packaging\version_main.txt"
 $versionClean = Join-Path $PSScriptRoot "packaging\version_clean.txt"
 $versionCli = Join-Path $PSScriptRoot "packaging\version_cli.txt"
@@ -49,6 +50,14 @@ foreach ($versionFile in @($versionMain, $versionClean, $versionCli)) {
     if (-not (Test-Path -LiteralPath $versionFile)) {
         throw "Version resource file not found: $versionFile"
     }
+}
+
+# 版本号只在 edge_ie_manager\version.py 里维护，打包前先同步到版本资源和
+# version.json，避免各处版本号对不上导致“检查更新”判断错误。
+Write-Host "Syncing version metadata ..." -ForegroundColor Cyan
+& $python -3 $syncVersion
+if ($LASTEXITCODE -ne 0) {
+    throw "Version sync failed."
 }
 
 $common = @(
@@ -78,6 +87,13 @@ if ($ConsoleOnly) {
         run_gui.py
     if ($LASTEXITCODE -ne 0) {
         throw "GUI build failed. Check the PyInstaller output above."
+    }
+
+    # 把主程序 exe 的 sha256 和大小写进 version.json，更新器下载后可以校验完整性，
+    # 上传 Release 时用这份 version.json 即可。
+    & $python -3 $syncVersion --artifact (Join-Path $PSScriptRoot "dist\EdgeIEManager.exe")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Version metadata sync (checksum) failed."
     }
 
     Write-Host "Building clean portable GUI executable ..." -ForegroundColor Cyan

@@ -99,6 +99,30 @@ class Manager:
             details.append(result.message)
         return OperationResult(True, f"已删除：{url}", "info", details)
 
+    def remove_sites(self, urls: list[str], save: bool = True) -> OperationResult:
+        """一次删除多条记录，只保存一次（列表里不存在的条目跳过并说明）。"""
+        removed: list[str] = []
+        missing: list[str] = []
+        for url in urls:
+            if self.site_list.remove(url):
+                removed.append(url)
+            else:
+                missing.append(url)
+        if not removed:
+            return OperationResult(False, "选中的记录都已经不在列表里了。", "warning")
+        details = []
+        if missing:
+            preview = "；".join(missing[:5])
+            suffix = " 等" if len(missing) > 5 else ""
+            details.append(f"{len(missing)} 条没有找到，已跳过：{preview}{suffix}")
+        if save:
+            result = self.save()
+            if not result.ok:
+                return result
+            details.append(result.message)
+        message = f"已删除 {len(removed)} 条记录。"
+        return OperationResult(True, message, "info", details)
+
     def update_site(
         self,
         old_url: str,

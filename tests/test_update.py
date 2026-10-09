@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from edge_ie_manager import update
@@ -57,6 +58,27 @@ class SelfUpdateTests(unittest.TestCase):
         # 单元测试跑在源码环境（非 frozen），应当明确不支持自动替换
         self.assertIsNone(update.current_exe())
         self.assertFalse(update.can_self_update())
+
+
+class DeadlineTests(unittest.TestCase):
+    """urlopen 的 timeout 管不住 DNS 解析，_run_with_deadline 负责硬超时。"""
+
+    def test_returns_value(self):
+        self.assertEqual(update._run_with_deadline(lambda: 42, 5), 42)
+
+    def test_propagates_exception(self):
+        def boom():
+            raise ValueError("坏掉了")
+
+        with self.assertRaises(ValueError):
+            update._run_with_deadline(boom, 5)
+
+    def test_times_out_on_stuck_call(self):
+        started = time.monotonic()
+        with self.assertRaises(update.UpdateTimeout):
+            update._run_with_deadline(lambda: time.sleep(30), 0.2)
+        # 要在超时时间附近返回，而不是等满 30 秒
+        self.assertLess(time.monotonic() - started, 5)
 
 
 if __name__ == "__main__":

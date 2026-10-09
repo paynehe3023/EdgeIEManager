@@ -1,7 +1,7 @@
 {
-  "version": "1.0.6",
-  "notes": "修复自动更新后重启时弹出 Security validation failure 报错的问题（旧进程把 PyInstaller 引导变量带给了新进程）。",
+  "version": "1.0.7",
+  "notes": "1. 检查更新加了硬超时，网络被拦截时不再一直卡在“正在检查更新…”。\n2. 写入/移除策略改成后台执行，等待 UAC 时界面不再卡死。\n3. “打开检查页”会直接给出策略核对结论，而不是只打开 Edge。\n4. 列表支持多选后一次性删除。\n5. 下载中关闭窗口会先取消下载，避免替换到一半。\n6. 更新包写入 sha256/大小，下载后自动校验完整性。\n7. 版本号改为单一来源，避免版本漂移导致更新判断出错。",
   "download": "https://github.com/paynehe3023/EdgeIEManager/releases/latest/download/EdgeIEManager.exe",
-  "sha256": "",
-  "size": 0
+  "sha256": "9e971b58f0cc516988851787518081edb0e049032793d3242af179439b8cffe4",
+  "size": 12844302
 }

@@ -67,6 +67,15 @@ class UpdateCancelled(UpdateError):
     """用户主动取消了下载，界面按“提示”而不是“报错”处理。"""
 
 
+class UpdateTimeout(UpdateError):
+    """网络在给定时间内没有任何响应。
+
+    单独分出来是因为 urlopen(timeout=...) 只限制“连接/读写等待”，并不限制
+    DNS 解析（getaddrinfo）。在单位网络里 raw.githubusercontent.com 被拦截时，
+    解析这一步可能永久卡住，界面就会一直停在“正在检查更新…”。
+    """
+
+
 class CancelToken:
     """下载取消开关。
 
@@ -146,13 +155,45 @@ def is_newer(candidate: str, current: str = __version__) -> bool:
     return left > right
 
 
+def _run_with_deadline(func, timeout: float):
+    """在守护线程里执行 func，超过 timeout 秒还没结束就抛 UpdateTimeout。
+
+    urlopen 自带的 timeout 管不住 DNS 解析，所以这里再套一层硬超时兜底：
+    即使底层调用永远不返回，界面也能在 timeout 秒后拿到明确错误，
+    不会一直卡在“正在检查更新…”。
+    """
+    box: dict = {}
+
+    def runner() -> None:
+        try:
+            box["value"] = func()
+        except BaseException as exc:  # 把线程里的异常原样带回调用方
+            box["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise UpdateTimeout(
+            f"连接 GitHub 超过 {int(timeout)} 秒没有响应。\n"
+            "常见原因是单位网络屏蔽了 raw.githubusercontent.com / github.com。\n"
+            "可以稍后重试、换一个网络（例如手机热点），或点“打开发布页”手动下载。"
+        )
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 def _fetch(url: str, timeout: int = CHECK_TIMEOUT) -> bytes:
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"},
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read()
+    def _do() -> bytes:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read()
+
+    return _run_with_deadline(_do, timeout)
 
 
 def _test_base_url() -> str:
@@ -361,7 +402,9 @@ def download(
         if actual != info.sha256:
             _discard()
             raise UpdateError(
-                "校验失败，下载的文件不完整，已丢弃。\n"
+                "校验失败：下载到的文件和这一版的校验值对不上，已丢弃。\n"
+                "常见原因是发布页还没上传这一版的 EdgeIEManager.exe，"
+                "请稍后再试，或点“打开发布页”确认新版已经发布。\n"
                 f"期望 {info.sha256[:16]}… 实际 {actual[:16]}…"
             )
     return target
