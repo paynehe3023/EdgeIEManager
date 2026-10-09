@@ -89,13 +89,6 @@ if ($ConsoleOnly) {
         throw "GUI build failed. Check the PyInstaller output above."
     }
 
-    # 把主程序 exe 的 sha256 和大小写进 version.json，更新器下载后可以校验完整性，
-    # 上传 Release 时用这份 version.json 即可。
-    & $python -3 $syncVersion --artifact (Join-Path $PSScriptRoot "dist\EdgeIEManager.exe")
-    if ($LASTEXITCODE -ne 0) {
-        throw "Version metadata sync (checksum) failed."
-    }
-
     Write-Host "Building clean portable GUI executable ..." -ForegroundColor Cyan
     & $python @common `
         --name "EdgeIEManager-Clean" `
@@ -119,6 +112,17 @@ if ($ConsoleOnly) {
 
 if ($LASTEXITCODE -ne 0) {
     throw "Build failed. Check the PyInstaller output above."
+}
+
+# Record sha256/size of the GUI exe into version.json (used for update integrity
+# checks and for the Release upload). This must run after every build step:
+# each build regenerates dist\EdgeIEManager.exe, so an earlier write is overwritten.
+if (-not $ConsoleOnly) {
+    Write-Host "Recording checksum of the GUI executable ..." -ForegroundColor Cyan
+    & $python -3 $syncVersion --artifact (Join-Path $PSScriptRoot "dist\EdgeIEManager.exe")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Version metadata sync (checksum) failed."
+    }
 }
 
 Write-Host ""
