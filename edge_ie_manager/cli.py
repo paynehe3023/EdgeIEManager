@@ -101,7 +101,10 @@ def cmd_policy_install(args) -> int:
             return 1
         return code
 
-    result = manager.install_policy(scope=manager.config.scope)
+    result = manager.install_policy(
+        scope=manager.config.scope,
+        user_sid=getattr(args, "target_user_sid", None),
+    )
     return _print_result(result)
 
 
@@ -123,7 +126,12 @@ def cmd_policy_uninstall(args) -> int:
             return 1
         return code
 
-    return _print_result(manager.uninstall_policy(scope=manager.config.scope))
+    return _print_result(
+        manager.uninstall_policy(
+            scope=manager.config.scope,
+            user_sid=getattr(args, "target_user_sid", None),
+        )
+    )
 
 
 def _forward_global_args(args) -> list[str]:
@@ -133,6 +141,8 @@ def _forward_global_args(args) -> list[str]:
         forwarded += ["--config", str(args.config)]
     if getattr(args, "site_list", None):
         forwarded += ["--site-list", str(args.site_list)]
+    if getattr(args, "target_user_sid", None):
+        forwarded += ["--target-user-sid", str(args.target_user_sid)]
     return forwarded
 
 
@@ -202,6 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="配置文件路径（默认 %%LOCALAPPDATA%%\\EdgeIEManager\\config.json）",
     )
     parser.add_argument("--site-list", help="站点列表 XML 路径")
+    parser.add_argument(
+        "--target-user-sid",
+        default=None,
+        help="写用户策略时改写到这个 SID 的账号（提权子进程内部使用）",
+    )
     parser.add_argument(
         "--report-file",
         help="把本次运行的输出写入指定文件（提权子进程用它回传日志）",

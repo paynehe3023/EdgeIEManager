@@ -29,6 +29,8 @@ except ImportError:  # pragma: no cover
 
 POLICY_SUBKEY = r"SOFTWARE\Policies\Microsoft\Edge"
 
+CREATE_NO_WINDOW = 0x08000000
+
 VALUE_SITE_LIST = "InternetExplorerIntegrationSiteList"
 VALUE_LEVEL = "InternetExplorerIntegrationLevel"
 VALUE_REFRESH = "InternetExplorerIntegrationSiteListRefreshInterval"
@@ -50,12 +52,20 @@ def is_supported() -> bool:
     return winreg is not None
 
 
-def _hive(scope: str) -> int:
+def _root_and_path(scope: str, user_sid: str | None = None) -> tuple[int, str]:
+    """返回 (注册表根键, 策略子键路径)。
+
+    ``user_sid`` 只对用户范围有意义：给了就写 ``HKEY_USERS\\<SID>``。提权子进程
+    会用这个把策略写回“原始用户”的账号，否则普通用户借用管理员账号提权时，
+    策略会落到那个管理员名下，用户自己这边根本不生效。
+    """
     if winreg is None:
         raise RuntimeError("当前环境不支持注册表操作。")
     if scope == SCOPE_MACHINE:
-        return winreg.HKEY_LOCAL_MACHINE
-    return winreg.HKEY_CURRENT_USER
+        return winreg.HKEY_LOCAL_MACHINE, POLICY_SUBKEY
+    if user_sid:
+        return winreg.HKEY_USERS, f"{user_sid}\\{POLICY_SUBKEY}"
+    return winreg.HKEY_CURRENT_USER, POLICY_SUBKEY
 
 
 def is_admin() -> bool:
@@ -67,7 +77,31 @@ def is_admin() -> bool:
         return False
 
 
-def is_scope_writable(scope: str) -> bool:
+def current_user_sid() -> str | None:
+    """返回当前登录账户的 SID（形如 S-1-5-21-...）。
+
+    提权时会把原始用户的 SID 传给提权子进程，让它写 ``HKEY_USERS\\<SID>``。
+    这样普通用户即使借别人的管理员账号提权，策略也会写回自己的账号。
+    """
+    if os.name != "nt":
+        return None
+    try:
+        result = subprocess.run(
+            ["whoami", "/user"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for token in (result.stdout or "").split():
+        if token.upper().startswith("S-1-"):
+            return token
+    return None
+
+
+def is_scope_writable(scope: str, user_sid: str | None = None) -> bool:
     """当前账户能否写入该范围的策略注册表（只探测权限，不改动注册表）。
 
     有的单位会把 HKCU\\SOFTWARE\\Policies 也锁成“只有管理员能写”，这时即使选
@@ -77,18 +111,22 @@ def is_scope_writable(scope: str) -> bool:
     if winreg is None:
         return False
     try:
-        with winreg.OpenKey(_hive(scope), POLICY_SUBKEY, 0, winreg.KEY_SET_VALUE):
+        root, path = _root_and_path(scope, user_sid)
+    except RuntimeError:
+        return False
+    try:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_SET_VALUE):
             return True
     except FileNotFoundError:
         pass
     except OSError:
         return False
     # 策略键还不存在时，往上找最近一个存在的父键，看能否在其下创建子键。
-    parts = POLICY_SUBKEY.split("\\")
+    parts = path.split("\\")
     for end in range(len(parts) - 1, 0, -1):
         parent = "\\".join(parts[:end])
         try:
-            with winreg.OpenKey(_hive(scope), parent, 0, winreg.KEY_CREATE_SUB_KEY):
+            with winreg.OpenKey(root, parent, 0, winreg.KEY_CREATE_SUB_KEY):
                 return True
         except FileNotFoundError:
             continue
@@ -125,14 +163,15 @@ class PolicyState:
         return f"已启用 IE 模式，站点列表：{self.site_list_url}"
 
 
-def read_policy(scope: str = SCOPE_USER) -> PolicyState:
+def read_policy(scope: str = SCOPE_USER, user_sid: str | None = None) -> PolicyState:
     state = PolicyState(scope=scope)
     if winreg is None:
         state.readable = False
         state.error = "非 Windows 环境"
         return state
     try:
-        with winreg.OpenKey(_hive(scope), POLICY_SUBKEY, 0, winreg.KEY_READ) as key:
+        root, path = _root_and_path(scope, user_sid)
+        with winreg.OpenKey(root, path, 0, winreg.KEY_READ) as key:
             state.exists = True
             names = set()
             index = 0
@@ -161,22 +200,20 @@ def read_policy(scope: str = SCOPE_USER) -> PolicyState:
     return state
 
 
-def _write_value(scope: str, subkey: str, name: str, value, value_type: int) -> None:
-    if winreg is None:
-        raise RuntimeError("当前环境不支持注册表操作。")
-    with winreg.CreateKeyEx(
-        _hive(scope), subkey, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ
-    ) as key:
+def _write_value(
+    scope: str, name: str, value, value_type: int, user_sid: str | None = None
+) -> None:
+    root, path = _root_and_path(scope, user_sid)
+    with winreg.CreateKeyEx(root, path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ) as key:
         winreg.SetValueEx(key, name, 0, value_type, value)
 
 
-def _delete_value(scope: str, subkey: str, name: str) -> bool:
+def _delete_value(scope: str, name: str, user_sid: str | None = None) -> bool:
     if winreg is None:
         return False
     try:
-        with winreg.OpenKey(
-            _hive(scope), subkey, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ
-        ) as key:
+        root, path = _root_and_path(scope, user_sid)
+        with winreg.OpenKey(root, path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ) as key:
             winreg.DeleteValue(key, name)
         return True
     except FileNotFoundError:
@@ -188,6 +225,7 @@ def install_policy(
     site_list_url: str,
     refresh_interval: int | None = None,
     allow_reload_in_ie: bool = True,
+    user_sid: str | None = None,
 ) -> None:
     """写入启用 IE 模式所需的注册表策略。"""
     if scope not in (SCOPE_USER, SCOPE_MACHINE):
@@ -195,32 +233,32 @@ def install_policy(
     if not site_list_url.strip():
         raise ValueError("站点列表地址不能为空。")
 
-    _write_value(scope, POLICY_SUBKEY, VALUE_SITE_LIST, site_list_url.strip(), winreg.REG_SZ)
-    _write_value(scope, POLICY_SUBKEY, VALUE_LEVEL, IE_MODE_LEVEL, winreg.REG_DWORD)
+    _write_value(scope, VALUE_SITE_LIST, site_list_url.strip(), winreg.REG_SZ, user_sid)
+    _write_value(scope, VALUE_LEVEL, IE_MODE_LEVEL, winreg.REG_DWORD, user_sid)
     _write_value(
         scope,
-        POLICY_SUBKEY,
         VALUE_RELOAD_ALLOWED,
         1 if allow_reload_in_ie else 0,
         winreg.REG_DWORD,
+        user_sid,
     )
     if refresh_interval and refresh_interval > 0:
         _write_value(
             scope,
-            POLICY_SUBKEY,
             VALUE_REFRESH,
             int(refresh_interval),
             winreg.REG_DWORD,
+            user_sid,
         )
     else:
-        _delete_value(scope, POLICY_SUBKEY, VALUE_REFRESH)
+        _delete_value(scope, VALUE_REFRESH, user_sid)
 
 
-def uninstall_policy(scope: str) -> list[str]:
+def uninstall_policy(scope: str, user_sid: str | None = None) -> list[str]:
     """删除本工具写入的注册表值，返回实际删除的值名。"""
     removed: list[str] = []
     for name in MANAGED_VALUES:
-        if _delete_value(scope, POLICY_SUBKEY, name):
+        if _delete_value(scope, name, user_sid):
             removed.append(name)
     return removed
 

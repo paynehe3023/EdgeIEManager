@@ -264,7 +264,12 @@ class Manager:
         except ValueError:
             return str(path)
 
-    def install_policy(self, scope: str | None = None, elevate: bool = False) -> OperationResult:
+    def install_policy(
+        self,
+        scope: str | None = None,
+        elevate: bool = False,
+        user_sid: str | None = None,
+    ) -> OperationResult:
         scope = scope or self.config.scope
         url = self.site_list_url()
         if not self.config.site_list_file.exists():
@@ -314,6 +319,7 @@ class Manager:
                 url,
                 refresh_interval=self.config.refresh_interval or None,
                 allow_reload_in_ie=self.config.allow_reload_in_ie,
+                user_sid=user_sid,
             )
         except PermissionError as exc:
             root = policy.SCOPE_ROOT_NAMES.get(scope, "")
@@ -335,7 +341,12 @@ class Manager:
             f"已写入 {policy.describe_scope(scope)} 的 IE 模式策略，重启 Edge 后生效。",
         )
 
-    def uninstall_policy(self, scope: str | None = None, elevate: bool = False) -> OperationResult:
+    def uninstall_policy(
+        self,
+        scope: str | None = None,
+        elevate: bool = False,
+        user_sid: str | None = None,
+    ) -> OperationResult:
         scope = scope or self.config.scope
 
         if elevate:
@@ -361,7 +372,7 @@ class Manager:
             )
 
         try:
-            removed = policy.uninstall_policy(scope)
+            removed = policy.uninstall_policy(scope, user_sid=user_sid)
         except PermissionError as exc:
             return OperationResult(
                 False,
@@ -378,9 +389,15 @@ class Manager:
     # ---------------------------------------------------------------- 诊断
     def _elevate_args_prefix(self) -> list[str]:
         """提权子进程要用的全局参数：让它读写同一份配置与数据目录。"""
+        args: list[str] = []
         if self.config.config_path:
-            return ["--config", str(self.config.config_path)]
-        return []
+            args += ["--config", str(self.config.config_path)]
+        # 带上“原始用户”的 SID：提权子进程写用户策略时写回这个账号的 hive，
+        # 而不是执行提权的那个管理员账号，否则普通用户提权后会写错位置。
+        sid = policy.current_user_sid()
+        if sid:
+            args += ["--target-user-sid", sid]
+        return args
 
     def _elevate_report_path(self) -> Path:
         """提权子进程的输出文件，用于失败时把真实原因带回界面。"""

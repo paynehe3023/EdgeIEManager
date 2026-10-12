@@ -37,6 +37,10 @@ LOG_MAX_LINES = 500
 # 日志区最小高度（像素）：再挤也要留几行，方便看报错。
 # 日志框最小高度：要放得下右侧的“自动滚动 + 清空日志”，小于这个值按钮会被裁掉。
 LOG_MIN_HEIGHT = 98
+# 检查更新发现新版时，在“关于”按钮右侧亮起的红点颜色（两个主题下都够醒目）。
+UPDATE_DOT_COLOR = "#e53935"
+# 作者联系方式，显示在“关于 → 联系作者”里。
+CONTACT_QQ = "947919822"
 
 
 def _format_bytes(size: int) -> str:
@@ -172,7 +176,11 @@ class App:
         self._update_inflight = False
         self._pending_update = None
         self._download_log_milestone = -1
-        self._about_dot: tk.Label | None = None
+        self._about_dot: tk.Canvas | None = None
+        self._about_dot_item: int | None = None
+        self._log_sash: tk.Frame | None = None
+        self._log_user_height: int | None = None
+        self._sash_drag: tuple[int, int] | None = None
         self._download_frame: ttk.Frame | None = None
         self._download_label: ttk.Label | None = None
         self._download_progress: ttk.Progressbar | None = None
@@ -286,11 +294,16 @@ class App:
             self._modes_compact = None
             self._on_right_panel_configure(SimpleNamespace(width=280))
             self.root.update_idletasks()
+            sash_height = 0
+            if getattr(self, "_log_sash", None) is not None:
+                # 日志区上沿的可拖动分隔条也要占高度，漏算会把日志最后一行裁掉。
+                sash_height = self._log_sash.winfo_reqheight() + 2
             needed = (
                 self.top_bar.winfo_reqheight()
                 + self.template_bar.winfo_reqheight()
                 + self.action_bar.winfo_reqheight()
                 + self._body_right.winfo_reqheight()
+                + sash_height
                 + LOG_MIN_HEIGHT
                 + 16
             )
@@ -322,7 +335,10 @@ class App:
             pass
 
     def _fit_log_height(self, window_height: int) -> None:
-        """窗口变矮时压缩日志区高度，优先保证上面的表单完整可见。"""
+        """确定日志区高度：默认按内容，用户拖过分隔条后以他拖的高度为准。
+
+        窗口变矮时仍然要能把日志压回去，否则上面的表单会被日志区挤没。
+        """
         if getattr(self, "_log_natural_height", None) is None:
             return
         used = (
@@ -335,7 +351,10 @@ class App:
             need_body = self._body_right.winfo_reqheight()
         except tk.TclError:  # pragma: no cover - 关闭过程中的竞态
             return
-        height = max(LOG_MIN_HEIGHT, min(self._log_natural_height, available - need_body))
+        preferred = getattr(self, "_log_user_height", None)
+        if preferred is None:
+            preferred = self._log_natural_height
+        height = max(LOG_MIN_HEIGHT, min(preferred, available - need_body))
         self._toggle_log_limit_label(height - self._log_frame_chrome())
         if abs(height - getattr(self, "_log_height", -1)) < 2:
             return
@@ -344,6 +363,22 @@ class App:
             self.log_frame.configure(height=height)
         except tk.TclError:  # pragma: no cover
             pass
+
+    def _on_log_sash_press(self, event) -> None:
+        self._sash_drag = (event.y_root, self.log_frame.winfo_height())
+
+    def _on_log_sash_drag(self, event) -> None:
+        """拖动分隔条调日志高度：向上拖变高，向下拖变矮。"""
+        if self._sash_drag is None:
+            return
+        start_y, start_height = self._sash_drag
+        self._log_user_height = max(
+            LOG_MIN_HEIGHT, start_height + (start_y - event.y_root)
+        )
+        self._fit_log_height(self.root.winfo_height())
+
+    def _on_log_sash_release(self, _event=None) -> None:
+        self._sash_drag = None
 
     def _log_frame_chrome(self) -> int:
         """日志框外框（标题、内边距、边框）占掉的高度，用来把内高换算成框高。"""
@@ -395,7 +430,9 @@ class App:
             role = self._chip_role.get(key, "idle")
             dot.configure(bg=pal["card"], fg=pal[f"{role}"] if role in pal else pal["muted"])
         if self._about_dot is not None:
-            self._about_dot.configure(bg=pal["bg"], fg=pal["err"])
+            self._about_dot.configure(bg=pal["bg"])
+        if getattr(self, "_log_sash", None) is not None:
+            self._log_sash.configure(bg=pal["border"])
 
     def on_toggle_theme(self) -> None:
         self.manager.config.theme = theme.DARK if self.theme_var.get() else theme.LIGHT
@@ -685,6 +722,13 @@ class App:
         frame.pack(side="bottom", fill="x", padx=14, pady=(4, 6))
         self.log_frame = frame
 
+        # 日志框上沿放一条可拖动的分隔条，用户能自己拉高/压低日志区。
+        self._log_sash = tk.Frame(self.root, height=6, bd=0, cursor="sb_v_double_arrow")
+        self._log_sash.pack(side="bottom", fill="x", padx=14, pady=(2, 0))
+        self._log_sash.bind("<Button-1>", self._on_log_sash_press)
+        self._log_sash.bind("<B1-Motion>", self._on_log_sash_drag)
+        self._log_sash.bind("<ButtonRelease-1>", self._on_log_sash_release)
+
         self._download_frame = ttk.Frame(frame, style="Card.TFrame")
         self._download_label = ttk.Label(
             self._download_frame, text="准备下载…", style="CardMuted.TLabel"
@@ -758,17 +802,7 @@ class App:
         more.pack(side="left")
         self._menus.append(more_menu)
 
-        # “关于”放在“更多”旁边，下拉里放版本号和检查更新
-        self._about_dot = tk.Label(
-            left,
-            text="",
-            width=1,
-            bd=0,
-            font=("Segoe UI", 9),
-            background=self._palette["bg"],
-            foreground=self._palette["err"],
-        )
-        self._about_dot.pack(side="left", padx=(6, 0))
+        # “关于”放在“更多”旁边，下拉里放版本号、检查更新和联系作者。
         self._about_button = ttk.Menubutton(left, text="关于 \u25be")
         about_menu = tk.Menu(self._about_button, tearoff=False)
         about_menu.add_command(label=f"版本 v{__version__}", state="disabled")
@@ -778,9 +812,26 @@ class App:
             label="打开下载页",
             command=lambda: update.open_releases_page(self.update_repo()),
         )
+        about_menu.add_separator()
+        about_menu.add_command(label="联系作者", command=self.on_contact_author)
         self._about_button.configure(menu=about_menu)
         self._about_button.pack(side="left", padx=(2, 0))
         self._menus.append(about_menu)
+
+        # 有新版本时在“关于”右侧亮一个红点：用 canvas 画固定大小的圆点，
+        # 既醒目又不会把整行按钮撑高。
+        self._about_dot = tk.Canvas(
+            left,
+            width=14,
+            height=14,
+            bd=0,
+            highlightthickness=0,
+            background=self._palette["bg"],
+        )
+        self._about_dot_item = self._about_dot.create_oval(
+            2, 2, 12, 12, fill="", outline=""
+        )
+        self._about_dot.pack(side="left", padx=(3, 0))
 
         self.autosave_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(right, text="改动后自动保存", variable=self.autosave_var).pack(
@@ -1129,10 +1180,10 @@ class App:
             self.log(
                 "[!] 本机把用户级策略注册表锁成了只读，写入/删除策略时会弹一次管理员确认；"
                 "写完之后新增站点不会再弹。",
-                "warn",
+                "err",
             )
         else:
-            self.log("[!] 整机范围写入/删除策略需要管理员权限，会弹一次 UAC 确认。", "warn")
+            self.log("[!] 整机范围写入/删除策略需要管理员权限，会弹一次 UAC 确认。", "err")
 
     def on_add(self) -> None:
         url = self.url_var.get().strip()
@@ -1555,7 +1606,67 @@ class App:
 
     def _set_update_available(self, available: bool) -> None:
         if self._about_dot is not None:
-            self._about_dot.configure(text="\u25cf" if available else "")
+            self._about_dot.itemconfigure(
+                self._about_dot_item,
+                fill=UPDATE_DOT_COLOR if available else "",
+                outline=UPDATE_DOT_COLOR if available else "",
+            )
+
+    def on_contact_author(self) -> None:
+        """“关于 → 联系作者”：展示作者 QQ，并提供一键复制。"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("联系作者")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+
+        body = ttk.Frame(dialog, padding=(20, 16))
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(body, text="作者：payne", style="CardHeading.TLabel").pack(anchor="w")
+        ttk.Label(
+            body,
+            text="遇到问题或有建议，欢迎通过 QQ 联系。",
+            style="CardMuted.TLabel",
+        ).pack(anchor="w", pady=(4, 12))
+
+        status = ttk.Label(body, text="")
+        row = ttk.Frame(body)
+        row.pack(fill="x")
+        ttk.Label(
+            row, text=f"QQ：{CONTACT_QQ}", font=(theme.FONT, 12, "bold")
+        ).pack(side="left")
+        ttk.Button(
+            row, text="复制", width=8, command=lambda: self._copy_contact(status)
+        ).pack(side="left", padx=(12, 0))
+        status.pack(anchor="w", pady=(10, 0))
+
+        ttk.Button(body, text="关闭", width=10, command=dialog.destroy).pack(
+            anchor="e", pady=(14, 0)
+        )
+
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + max(
+            0, (self.root.winfo_width() - dialog.winfo_width()) // 2
+        )
+        y = self.root.winfo_rooty() + max(
+            0, (self.root.winfo_height() - dialog.winfo_height()) // 3
+        )
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+        dialog.focus_set()
+
+    def _copy_contact(self, status_label) -> None:
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(CONTACT_QQ)
+            self.root.update_idletasks()
+        except tk.TclError:  # pragma: no cover - 剪贴板被其它程序占用
+            pass
+        try:
+            status_label.configure(text=f"已复制到剪贴板：{CONTACT_QQ}")
+        except tk.TclError:  # pragma: no cover - 关闭过程中的竞态
+            pass
+        self.log(f"已复制作者 QQ：{CONTACT_QQ}", "ok")
 
     def _prompt_update(self, info) -> None:
         lines = [f"当前版本：v{__version__}", f"最新版本：{info.display}"]
