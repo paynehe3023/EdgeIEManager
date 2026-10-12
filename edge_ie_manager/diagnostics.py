@@ -181,6 +181,8 @@ def collect(cfg: Config) -> dict:
     site_list = site_list_report(cfg.site_list_file)
     user_state = policy.read_policy(policy.SCOPE_USER)
     machine_state = policy.read_policy(policy.SCOPE_MACHINE)
+    user_writable = policy.is_scope_writable(policy.SCOPE_USER)
+    machine_writable = policy.is_scope_writable(policy.SCOPE_MACHINE)
 
     expected_url = cfg.site_list_file.resolve().as_uri() if cfg.site_list_file.exists() else ""
     active = machine_state if machine_state.enabled else user_state
@@ -204,6 +206,20 @@ def collect(cfg: Config) -> dict:
     if site_list["entries"] and site_list["ie_count"] == 0 and site_list["edge_count"] == 0:
         warnings.append("所有站点都是“中性”，需要手动点“在 IE 模式下重新加载”；如需自动切换请改成“强制 IE 模式”。")
 
+    active_writable = machine_writable if active.scope == policy.SCOPE_MACHINE else user_writable
+    if not active_writable:
+        if active.scope == policy.SCOPE_USER:
+            warnings.append(
+                "本机把用户级策略注册表（HKCU\\SOFTWARE\\Policies）锁成了只读，"
+                "普通权限写不进去（常见于单位统一管控的电脑）。\n"
+                "    点“写入 / 更新策略”时会弹一次管理员确认，同意后即可写入；\n"
+                "    写完之后，日常新增/修改站点只更新站点列表文件，不会再弹 UAC。"
+            )
+        else:
+            warnings.append(
+                "写入整机策略需要管理员权限，点“写入 / 更新策略”时会弹一次管理员确认。"
+            )
+
     return {
         "app": APP_NAME,
         "app_version": __version__,
@@ -217,6 +233,8 @@ def collect(cfg: Config) -> dict:
         "expected_url": expected_url,
         "user_policy": user_state,
         "machine_policy": machine_state,
+        "user_writable": user_writable,
+        "machine_writable": machine_writable,
         "active_scope": active.scope,
         "warnings": warnings,
     }
@@ -244,7 +262,9 @@ def render_text(info: dict) -> str:
         "",
         "策略状态（注册表 SOFTWARE\\Policies\\Microsoft\\Edge）：",
         f"  当前用户(HKCU)：{info['user_policy'].summary()}",
+        f"    写入权限：{'可写（免管理员）' if info.get('user_writable') else '只读，写入需要管理员'}",
         f"  整机(HKLM)：{info['machine_policy'].summary()}",
+        f"    写入权限：{'可写' if info.get('machine_writable') else '需要管理员'}",
         "",
         "在 Edge 里核对：edge://policy 搜 InternetExplorerIntegration，"
         "以及 edge://compat/enterprise 查看已加载的站点列表。",

@@ -67,6 +67,36 @@ def is_admin() -> bool:
         return False
 
 
+def is_scope_writable(scope: str) -> bool:
+    """当前账户能否写入该范围的策略注册表（只探测权限，不改动注册表）。
+
+    有的单位会把 HKCU\\SOFTWARE\\Policies 也锁成“只有管理员能写”，这时即使选
+    “当前用户”范围也要提权。提前探测可以让界面把话说清楚，而不是等用户点了
+    “写入 / 更新策略”才莫名其妙弹出 UAC。
+    """
+    if winreg is None:
+        return False
+    try:
+        with winreg.OpenKey(_hive(scope), POLICY_SUBKEY, 0, winreg.KEY_SET_VALUE):
+            return True
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    # 策略键还不存在时，往上找最近一个存在的父键，看能否在其下创建子键。
+    parts = POLICY_SUBKEY.split("\\")
+    for end in range(len(parts) - 1, 0, -1):
+        parent = "\\".join(parts[:end])
+        try:
+            with winreg.OpenKey(_hive(scope), parent, 0, winreg.KEY_CREATE_SUB_KEY):
+                return True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+    return False
+
+
 @dataclass
 class PolicyState:
     scope: str

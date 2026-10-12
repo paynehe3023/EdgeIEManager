@@ -203,6 +203,8 @@ class App:
 
         self.reload_all(first=True)
         self._refresh_status()
+        # 提前说明写入策略是否需要管理员，免得用户点了按钮才莫名弹出 UAC。
+        self._warn_if_scope_readonly(self.current_scope())
         self._apply_theme_widgets()
         self._geometry_ready = False
         self.root.bind("<Configure>", self._on_root_configure)
@@ -1108,10 +1110,29 @@ class App:
         self.mode_hint.configure(text=MODE_DESCRIPTIONS.get(self.mode_var.get(), ""))
 
     def on_scope_change(self, _event=None) -> None:
-        self.manager.config.scope = self.current_scope()
+        scope = self.current_scope()
+        self.manager.config.scope = scope
         save_config(self.manager.config)
         self._refresh_status()
-        self.log(f"策略范围已切换为：{policy.describe_scope(self.current_scope())}")
+        self.log(f"策略范围已切换为：{policy.describe_scope(scope)}")
+        self._warn_if_scope_readonly(scope)
+
+    def _warn_if_scope_readonly(self, scope: str) -> None:
+        """提前告诉用户当前范围写入策略是否需要管理员，避免突然弹 UAC。"""
+        try:
+            writable = policy.is_scope_writable(scope)
+        except Exception:  # pragma: no cover - 探测失败不影响主流程
+            return
+        if writable:
+            return
+        if scope == policy.SCOPE_USER:
+            self.log(
+                "[!] 本机把用户级策略注册表锁成了只读，写入/删除策略时会弹一次管理员确认；"
+                "写完之后新增站点不会再弹。",
+                "warn",
+            )
+        else:
+            self.log("[!] 整机范围写入/删除策略需要管理员权限，会弹一次 UAC 确认。", "warn")
 
     def on_add(self) -> None:
         url = self.url_var.get().strip()
@@ -1267,14 +1288,22 @@ class App:
             self._policy_inflight = False
             self._set_policy_buttons_enabled(True)
             if action == "install":
-                prompt = (
-                    "写入这条策略需要管理员权限。\n\n"
-                    "当前账户对注册表的 Policies 位置只有只读权限（常见于单位统一管控的电脑），"
-                    "需要弹出 UAC 提示以管理员身份重试。\n\n"
-                    "如果拿不到管理员权限，可以把“策略范围”切到“当前用户 (免管理员)”再试。\n\n继续吗？"
-                )
+                if scope == policy.SCOPE_USER:
+                    prompt = (
+                        "写入策略需要管理员权限。\n\n"
+                        "这台电脑把用户级策略注册表（HKCU\\SOFTWARE\\Policies）锁成了只读，"
+                        "普通权限写不进去，所以即使是“当前用户”范围也要提权。\n\n"
+                        "接下来会弹一次 UAC 管理员确认，同意后即可写入。\n"
+                        "写完之后，日常新增/修改站点只更新站点列表文件，不会再弹 UAC。\n\n"
+                        "如果拿不到管理员权限，请联系 IT 用组策略统一部署。\n\n继续吗？"
+                    )
+                else:
+                    prompt = (
+                        "写入整机策略需要管理员权限。\n\n"
+                        "接下来会弹一次 UAC 管理员确认，同意后即可写入。\n\n继续吗？"
+                    )
             else:
-                prompt = "删除这条策略需要管理员权限，是否弹出 UAC 提示并以管理员身份重试？"
+                prompt = "删除这条策略需要管理员权限，接下来会弹一次 UAC 管理员确认。\n\n继续吗？"
             if not self._confirm_elevation(prompt):
                 self.report(result)
                 self._refresh_status()
