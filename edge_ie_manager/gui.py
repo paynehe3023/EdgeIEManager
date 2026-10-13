@@ -753,8 +753,8 @@ class App:
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True)
         self._log_body = body
-        # 文本区默认 6 行高；整个日志框的高度由 _fit_log_height 按窗口空间调整。
-        self.log_text = tk.Text(body, height=6, wrap="word", state="disabled")
+        # 文本区默认 10 行高；整个日志框的高度由 _fit_log_height 按窗口空间调整。
+        self.log_text = tk.Text(body, height=10, wrap="word", state="disabled")
         self.log_text.pack(side="left", fill="both", expand=True)
 
         side = ttk.Frame(body)
