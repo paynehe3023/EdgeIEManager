@@ -268,11 +268,18 @@ def configured_scopes() -> list[PolicyState]:
 
 
 def effective_state(preferred_scope: str = SCOPE_USER) -> PolicyState:
-    """机器策略优先于用户策略；本工具默认按用户策略判断。"""
+    """返回实际生效的 IE 模式策略。
+
+    Edge 的规则是“机器策略优先于用户策略”：只要机器策略里配置了
+    InternetExplorerIntegrationLevel / SiteList 中的任意一项，用户策略就不再
+    参与判定（哪怕机器策略只配了一半）。没有机器级 IE 配置时才按
+    ``preferred_scope`` 返回。不能简单地用 ``exists`` 判断——机器键里通常还
+    放着 IT 下发的其它 Edge 策略。
+    """
     states = {state.scope: state for state in configured_scopes()}
     machine = states[SCOPE_MACHINE]
     user = states[SCOPE_USER]
-    if machine.enabled and user.enabled and machine.site_list_url != user.site_list_url:
+    if machine.level is not None or machine.site_list_url:
         return machine
     return states.get(preferred_scope, user)
 

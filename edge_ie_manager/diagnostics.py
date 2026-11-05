@@ -185,7 +185,8 @@ def collect(cfg: Config) -> dict:
     machine_writable = policy.is_scope_writable(policy.SCOPE_MACHINE)
 
     expected_url = cfg.site_list_file.resolve().as_uri() if cfg.site_list_file.exists() else ""
-    active = machine_state if machine_state.enabled else user_state
+    # 机器策略优先；用户策略只在机器级没有 IE 配置时生效。
+    active = policy.effective_state(cfg.scope)
 
     warnings: list[str] = []
     if not site_list["exists"]:

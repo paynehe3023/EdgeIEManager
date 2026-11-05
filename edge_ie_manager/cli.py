@@ -79,6 +79,22 @@ def cmd_add_month(args) -> int:
     return _print_result(manager.add_from_templates(month_offset=args.month_offset))
 
 
+def _elevate_report_path(manager: Manager) -> Path:
+    """提权子进程的输出文件：提权后的控制台是隐藏的，只能靠这个文件回传日志。"""
+    return Path(manager.config.base_dir) / "elevate-last.log"
+
+
+def _emit_elevate_failure(report: Path, code: int) -> None:
+    _emit(f"[!] 提权进程返回错误码 {code}。")
+    try:
+        text = report.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    lines = [line for line in text.splitlines() if line.strip()]
+    for line in lines[-12:]:
+        _emit(f"    {line}")
+
+
 def cmd_policy_install(args) -> int:
     manager = _manager(args)
     if args.scope:
@@ -95,10 +111,13 @@ def cmd_policy_install(args) -> int:
         ]
         if getattr(args, "refresh", None) is not None:
             forwarded += ["--refresh", str(args.refresh)]
-        started, code = policy.run_elevated(forwarded)
+        report = _elevate_report_path(manager)
+        started, code = policy.run_elevated(forwarded, report_file=report)
         if not started:
             _emit("[!] 提权被取消或失败。")
             return 1
+        if code != 0:
+            _emit_elevate_failure(report, code)
         return code
 
     result = manager.install_policy(
@@ -120,10 +139,13 @@ def cmd_policy_uninstall(args) -> int:
             "--scope",
             manager.config.scope,
         ]
-        started, code = policy.run_elevated(forwarded)
+        report = _elevate_report_path(manager)
+        started, code = policy.run_elevated(forwarded, report_file=report)
         if not started:
             _emit("[!] 提权被取消或失败。")
             return 1
+        if code != 0:
+            _emit_elevate_failure(report, code)
         return code
 
     return _print_result(

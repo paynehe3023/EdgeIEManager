@@ -1,6 +1,6 @@
 # Edge IE 模式站点管理器
 
-当前版本：**v1.1.0**
+当前版本：**v1.1.1**
 
 一个零依赖的 Windows 小工具，用来管理 Microsoft Edge 的 **IE 模式站点列表**。
 把需要在 IE 模式下打开的网址登记一次，以后 Edge 就会按照这份列表自动用 IE 模式打开，
@@ -15,7 +15,7 @@ Edge 的 IE 模式依赖一份“企业模式站点列表（Enterprise Mode Site
 再由一条系统策略把 Edge 指向这份列表。手动维护很麻烦，本工具负责：
 
 - 用合适的格式（schema v.2）生成和维护 `sitelist.xml`；
-- 每次保存自动递增修订号、自动备份旧文件；
+- 每次保存时，只要站点内容有变化就自动递增修订号、备份旧文件；
 - 一键把策略写入注册表（当前用户可免管理员）；
 - 提供月度模板，点一下就能生成“本月/下月”的网址；
 - 一键自检 + 打开检查页，核对策略是否真的生效；
@@ -179,6 +179,9 @@ py -3 run_cli.py policy status                # 查看策略状态
 py -3 run_cli.py policy uninstall             # 删除本工具写入的策略
 py -3 run_cli.py policy export-reg            # 导出 .reg 文件
 ```
+
+> `restart-edge` 与界面上的“重启 Edge 生效”一样，会用 `taskkill /F` 强制关闭**所有**
+> Edge 窗口，未保存的网页内容可能丢失；脚本里调用前请留意。
 
 `policy install` 还支持 `--refresh <分钟>` 设置站点列表自动刷新间隔。
 

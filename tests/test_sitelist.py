@@ -127,6 +127,33 @@ class SaveTests(unittest.TestCase):
             self.assertEqual(reloaded.sites[0].note, "月度报表")
             self.assertNotIn("月度报表", path.read_text(encoding="utf-8"))
 
+    def test_unchanged_content_keeps_version_and_skips_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sitelist.xml"
+            sl = load_site_list(path)
+            sl.add(Site(url="a.com", mode=SiteMode.IE, note="备注"))
+            save_site_list(sl, path)
+            version = sl.version
+            backups = list((Path(tmp) / "backups").glob("sitelist.*.xml"))
+            self.assertEqual(backups, [])
+
+            # 内容不变：不递增修订号，也不产生多余备份。
+            save_site_list(sl, path)
+            self.assertEqual(sl.version, version)
+            self.assertEqual(list((Path(tmp) / "backups").glob("sitelist.*.xml")), [])
+
+            # 只改备注也不递增修订号，但备注要落盘。
+            sl.sites[0].note = "新备注"
+            save_site_list(sl, path)
+            self.assertEqual(sl.version, version)
+            self.assertEqual(load_site_list(path).sites[0].note, "新备注")
+
+            # 站点内容变化才递增，并给旧文件留一份备份。
+            sl.sites[0].mode = SiteMode.EDGE
+            save_site_list(sl, path)
+            self.assertEqual(sl.version, version + 1)
+            self.assertEqual(len(list((Path(tmp) / "backups").glob("sitelist.*.xml"))), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

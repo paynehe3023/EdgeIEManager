@@ -95,5 +95,46 @@ class TargetHiveTests(unittest.TestCase):
             self.assertTrue(call.args[1].startswith("S-1-5-21-9\\"), call.args[1])
 
 
+class EffectiveStateTests(unittest.TestCase):
+    @staticmethod
+    def _state(scope, level=None, url=""):
+        return policy_module.PolicyState(
+            scope=scope,
+            exists=bool(level is not None or url),
+            site_list_url=url,
+            level=level,
+        )
+
+    def test_machine_policy_wins_even_when_incomplete(self):
+        from unittest import mock
+
+        machine = self._state("machine", level=IE_MODE_LEVEL)  # 只配了等级，没配列表
+        user = self._state("user", level=IE_MODE_LEVEL, url="file:///u.xml")
+        with mock.patch.object(
+            policy_module, "configured_scopes", return_value=[user, machine]
+        ):
+            self.assertIs(policy_module.effective_state("user"), machine)
+
+    def test_user_policy_used_when_machine_has_no_ie_config(self):
+        from unittest import mock
+
+        machine = self._state("machine", level=None, url="")
+        user = self._state("user", level=IE_MODE_LEVEL, url="file:///u.xml")
+        with mock.patch.object(
+            policy_module, "configured_scopes", return_value=[user, machine]
+        ):
+            self.assertIs(policy_module.effective_state("user"), user)
+
+    def test_preferred_machine_scope_is_respected(self):
+        from unittest import mock
+
+        machine = self._state("machine", level=None, url="")
+        user = self._state("user", level=IE_MODE_LEVEL, url="file:///u.xml")
+        with mock.patch.object(
+            policy_module, "configured_scopes", return_value=[user, machine]
+        ):
+            self.assertIs(policy_module.effective_state("machine"), machine)
+
+
 if __name__ == "__main__":
     unittest.main()

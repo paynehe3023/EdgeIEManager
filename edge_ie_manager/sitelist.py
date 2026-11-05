@@ -216,6 +216,24 @@ def _prune_backups(target_dir: Path, original: Path) -> None:
             pass
 
 
+def _sites_signature(sites: list[Site]) -> list[tuple]:
+    return [
+        (site.url, site.mode.value, site.compat_mode or "", tuple(site.extra_xml))
+        for site in sites
+    ]
+
+
+def _sites_unchanged(sl: SiteList, target: Path) -> bool:
+    """目标文件里的站点内容是否与内存中的完全一致（忽略修订号与创建信息）。"""
+    if not target.exists():
+        return False
+    try:
+        existing = parse_xml(target.read_text(encoding="utf-8-sig"), target)
+    except (OSError, SiteListError, UnicodeDecodeError):
+        return False
+    return _sites_signature(existing.sites) == _sites_signature(sl.sites)
+
+
 def save_site_list(
     sl: SiteList,
     path: str | Path | None = None,
@@ -223,11 +241,16 @@ def save_site_list(
     make_backup: bool = True,
     backups_dir: str | Path | None = None,
 ) -> Path:
-    """写回 XML。默认递增修订号并保留一份备份。"""
+    """写回 XML。默认在站点内容变化时递增修订号，并保留一份备份。
+
+    修订号是 Edge 判断“列表是否更新过”的依据；只改备注（存在 meta.json 里）
+    或重复保存同样的内容时不必递增，否则会让 Edge 白重新加载一次。
+    """
     target = Path(path or sl.path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    if bump_version:
+    changed = not _sites_unchanged(sl, target)
+    if bump_version and changed:
         sl.version = max(int(sl.version or 0), 0) + 1
     if not sl.date_created:
         sl.date_created = timestamp()
@@ -237,6 +260,13 @@ def save_site_list(
         ET.fromstring(text)
     except ET.ParseError as exc:  # 理论上不会发生，作为最后一道保险
         raise SiteListError(f"生成的 XML 无效：{exc}") from exc
+
+    # 站点内容没变：不需要递增修订号、不需要备份，也不需要重写文件。
+    # 备注可能存在 meta.json 里，这一步仍然要写，保证备注能落盘。
+    if not changed and target.exists():
+        sl.path = target
+        _write_meta(sl)
+        return target
 
     if make_backup:
         backup_site_list(target, backups_dir)
