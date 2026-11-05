@@ -55,6 +55,18 @@ class ValidateUrlTests(unittest.TestCase):
     def test_allows_port(self):
         self.assertEqual(validate_url("report.contoso.com:8080/x")[0], "report.contoso.com:8080/x")
 
+    def test_warns_about_session_token_url(self):
+        value, warning = validate_url(
+            "ebs.ewpt.cn:8000/OA_HTML/RF.jsp?function_id=28716&oas=abc&params=xyz"
+        )
+        self.assertIsNotNone(value)
+        self.assertIn("会话参数", warning or "")
+        self.assertIn("ebs.ewpt.cn:8000", warning or "")
+
+    def test_plain_query_is_not_flagged(self):
+        _, warning = validate_url("report.contoso.com/list?page=2")
+        self.assertIsNone(warning)
+
 
 class ParseModeTests(unittest.TestCase):
     def test_alias(self):

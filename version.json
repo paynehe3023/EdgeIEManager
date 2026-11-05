@@ -1,7 +1,7 @@
 {
-  "version": "1.1.1",
-  "notes": "1. 修复环境诊断在“整机策略已配置、用户策略未配置”时可能显示错误范围的问题，改为统一的“机器策略优先”判定。\n2. 命令行 policy install/uninstall --elevate 现在会把提权进程的日志回传到终端，写入失败时能直接看到原因。\n3. 站点内容没有变化时保存不再递增修订号（只改备注不会让 Edge 重新加载列表），也不会产生多余备份。\n4. README 补充：命令行的 restart-edge 与界面按钮一样会强制关闭所有 Edge 窗口。",
+  "version": "1.1.2",
+  "notes": "1. 添加网址时，如果地址带有 oas/_ti/params 等会话参数，会提示该地址登录或退出后失效，建议只登记域名。\n2. README 新增 IE 模式排查说明：登录页跳转后可能退出 IE 模式（应登记域名）、会话失效提示、地址栏没有 IE 图标的检查步骤、WININET 代理差异，以及远程调试会禁用 IE 模式。\n3. 版本号 1.1.2。",
   "download": "https://github.com/paynehe3023/EdgeIEManager/releases/latest/download/EdgeIEManager.exe",
-  "sha256": "e33490a48071f5cf3709b7b95f9960395d8844d56aa449625cbf69b82e18792b",
-  "size": 11821848
+  "sha256": "fb47277af896b52daac1d45c641208c5b40eab88ca16e81bb605c67fa34d4b83",
+  "size": 11821672
 }

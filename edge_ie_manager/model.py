@@ -61,6 +61,10 @@ _MODE_ALIASES: dict[str, SiteMode] = {
 
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 
+# 会话令牌参数：Oracle EBS 等系统会把当前会话绑在 URL 里（oas/_ti/params）。
+# 这种地址登录或退出后就失效，不能当作长期入口登记。
+_SESSION_PARAM_RE = re.compile(r"[?&](?:oas|_ti|wcsid|params)=", re.IGNORECASE)
+
 
 def mode_label(mode: SiteMode | str) -> str:
     value = mode.value if isinstance(mode, SiteMode) else str(mode)
@@ -131,13 +135,18 @@ def validate_url(url: str) -> tuple[str | None, str | None]:
         if host_only not in ("localhost",):
             return None, f"“{value}”看起来不像有效域名，请检查是否漏了域名后缀。"
 
-    warning = None
+    warnings: list[str] = []
     if scheme:
-        warning = (
+        warnings.append(
             f"已自动去掉 {scheme}:// 前缀。站点列表不带协议时会同时匹配 http 与 https，"
             "带上协议反而缩小匹配范围。"
         )
-    return value, warning
+    if _SESSION_PARAM_RE.search(value):
+        warnings.append(
+            "网址里带有会话参数（如 oas/_ti/params），这类地址登录或退出后就会失效；"
+            f"建议只登记域名（例如 {host_part}），该域名下的所有页面都会用 IE 模式打开。"
+        )
+    return value, "；".join(warnings) if warnings else None
 
 
 @dataclass
